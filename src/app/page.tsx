@@ -295,12 +295,15 @@ export default function Dashboard() {
     pending.current.push(...newJobs.map(({ id, file }) => ({ id, file })));
     void processQueue();
   }, [processQueue, recoverable]);
-  const onPair = (front: File, back?: File) => {
-    if (recoverable) { setNotice('Resolve unsynced browser recovery before scanning new cards.'); return; }
+  const onPair = (front: File, back?: File): boolean => {
+    if (recoverable) { setNotice('Resolve unsynced browser recovery before scanning new cards.'); return false; }
+    if (!accountIdRef.current) { setNotice('Please sign in before scanning a card.'); return false; }
     const id = ++nextJobId.current;
     setJobList([...jobsRef.current, { id, name: `${front.name}${back ? ' + back' : ''}`, state: 'preparing' }]);
     pending.current.push({ id, file: front, back });
+    setNotice('Captured card added to the processing queue. Check its status below.');
     void processQueue();
+    return true;
   };
   const onDecide = async (candidateId: string, action: 'keep'|'replace'|'merge'|'skip') => {
     if (recoverable || uploadBusy) { setNotice('Complete pending synchronization or image upload before reviewing duplicates.'); return; }

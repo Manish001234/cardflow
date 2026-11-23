@@ -25,7 +25,7 @@ test('captured photos are converted to File objects without a paid service', () 
   assert.match(component, /canvas\.toBlob/);
   assert.match(component, /new File\(\[blob\]/);
   assert.match(component, /validateImage\(file\)/);
-  assert.match(component, /onScan\(captured\.current\.front\.file, captured\.current\.back\?\.file\)/);
+  assert.match(component, /onScan\(frontFile, backFile\)/);
   assert.doesNotMatch(component, /\/api\/extract-card|gemini|openai/i);
 });
 
@@ -43,4 +43,21 @@ test('camera UI includes failure handling, accessible dialog and disabled scan w
   assert.match(component, /disabled=\{!front \|\| processing \|\| busy\}/);
   assert.match(component, /NotAllowedError/);
   assert.match(component, /NotFoundError/);
+});
+
+
+test('camera stops live stream and preserves images when queue rejects submission', () => {
+  const submit = component.slice(component.indexOf('  const submit = () => {'), component.indexOf('  return <>'));
+  assert.match(submit, /stopCamera\(\);/);
+  assert.match(submit, /const accepted = onScan\(frontFile, backFile\)/);
+  assert.match(submit, /if \(accepted\) close\(\)/);
+  assert.match(submit, /still available/);
+  assert.match(page, /const onPair = \(front: File, back\?: File\): boolean/);
+  assert.match(page, /return false/);
+  assert.match(page, /Captured card added to the processing queue/);
+  assert.match(page, /return true/);
+});
+
+test('camera scan control cannot submit a form', () => {
+  assert.match(component, /<button type="button" onClick=\{submit\}/);
 });

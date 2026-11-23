@@ -8,7 +8,7 @@ type Side = 'front' | 'back';
 type Capture = { file: File; url: string };
 type Props = {
   processing: boolean;
-  onScan: (front: File, back?: File) => void;
+  onScan: (front: File, back?: File) => boolean;
   onError: (message: string) => void;
 };
 
@@ -151,7 +151,7 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
     }
     setBusy(true);
     try {
-      const maxEdge = 2400;
+      const maxEdge = 1800;
       const ratio = Math.min(1, maxEdge / Math.max(element.videoWidth, element.videoHeight));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(element.videoWidth * ratio);
@@ -159,7 +159,7 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('Could not prepare the camera photo.');
       ctx.drawImage(element, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.88));
       if (!blob) throw new Error('Could not save the camera photo.');
       const file = new File([blob], `card-${side}-${Date.now()}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
       setCapture(side, file);
@@ -176,9 +176,22 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
   };
 
   const submit = () => {
-    if (!captured.current.front || processing || busy) return;
-    onScan(captured.current.front.file, captured.current.back?.file);
-    close();
+    const frontFile = captured.current.front?.file;
+    const backFile = captured.current.back?.file;
+    if (!frontFile || processing || busy) return;
+
+    // Stop the live video before starting local OCR to free the camera and memory.
+    // File objects remain valid after preview URLs are revoked.
+    stopCamera();
+    try {
+      const accepted = onScan(frontFile, backFile);
+      if (accepted) close();
+      else setMessage('The scan was not queued. Your captured photos are still available; resolve the notice and try again.');
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Could not queue the captured card.';
+      setMessage(detail);
+      onError(detail);
+    }
   };
 
   return <>
