@@ -1,0 +1,13 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const read = file => fs.readFileSync(path.resolve(__dirname, '../src/',file),'utf8');
+test('per-user contact filter exists for GET', () => assert.match(read('app/api/contacts/route.ts'), /find\(\{ userId: new ObjectId\(viewer\.id\) \}/));
+test('per-user contact filter exists for upsert and delete', () => {const src=read('app/api/contacts/route.ts'); assert.match(src,/findOneAndDelete\(\{ userId, id: op\.id, revision:/); assert.match(src,/replaceOne\(\{ userId, id: card\.id, revision:/);});
+test('Gemini endpoint requires a user session', () => assert.match(read('app/api/extract-card/route.ts'), /await getViewer\(\)/));
+test('legacy storage key is retained', () => assert.match(read('lib/storage.ts'), /visiting-card-ocr:v1/));
+test('session cookie is httpOnly and secure in production', () => {const src=read('lib/server/auth.ts');assert.match(src,/httpOnly: true/);assert.match(src,/secure: process\.env\.NODE_ENV === 'production'/);});
+test('session token stored in Mongo as a hash', () => assert.match(read('lib/server/auth.ts'), /tokenHash: hash\(token\)/));
+test('bulk snapshot replacement is not used', () => assert.doesNotMatch(read('app/api/contacts/route.ts'), /deleteMany|dropCollection/));
+test('existing login and registration validate password and hash', () => {assert.match(read('app/api/auth/register/route.ts'), /await hash\(parsed\.data\.password, 12\)/); assert.match(read('app/api/auth/login/route.ts'), /await compare\(/)});

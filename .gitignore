@@ -1,0 +1,66 @@
+node_modules
+.next
+out
+.env
+.env.local
+.env.*.local
+!.env.example
+*.tsbuildinfo
+.DS_Store
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js build files
+.next/
+out/
+build/
+dist/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Vercel local settings
+.vercel/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Testing and coverage
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# TypeScript cache
+*.tsbuildinfo
+next-env.d.ts
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Local database backups
+backups/
+*.dump
+*.archive
+
+# Local uploads
+uploads/
