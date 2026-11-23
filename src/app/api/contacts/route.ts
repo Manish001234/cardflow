@@ -7,7 +7,7 @@ import { ensureIndexes, getDb } from '@/lib/server/db';
 import { apiError, serverError } from '@/lib/server/http';
 import { cardSchema, type StoredCard } from '@/types/card';
 import { IMAGE_MIMES, MAX_IMAGE_BYTES, validImagePath } from '@/lib/blob-policy';
-type ContactDocument = StoredCard & { userId: ObjectId };
+type ContactDocument = Omit<StoredCard, 'revision'> & { userId: ObjectId; revision?: number | null };
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 const image = z.object({ pathname: z.string().max(300), size: z.number().int().min(1).max(MAX_IMAGE_BYTES), contentType: z.enum(IMAGE_MIMES) }).strict();
@@ -45,7 +45,7 @@ async function verifyImages(userId: string, card: z.infer<typeof stored>) {
     }
   }
 }
-async function cleanupImages(before: StoredCard | null, after?: StoredCard) {
+async function cleanupImages(before: Pick<StoredCard, 'images'> | null, after?: Pick<StoredCard, 'images'>) {
   if (!before?.images) return;
   const oldPaths = [before.images.front?.pathname, before.images.back?.pathname].filter((p): p is string => !!p);
   const current = new Set([after?.images?.front?.pathname, after?.images?.back?.pathname]);
