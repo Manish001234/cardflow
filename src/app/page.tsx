@@ -3,11 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, AlertCircle, ArrowRight, CheckCircle2, ChevronRight, Clock3, ContactRound, Download, FileSpreadsheet, FileText, FolderOpen, FileUp, Star, Tags, LayoutDashboard, Layers3, LoaderCircle, Menu, Plus, ScanLine, Search, LogOut, ShieldCheck, Sparkles, Trash2, TrendingUp, UploadCloud, X } from 'lucide-react';
 import { Uploader } from '@/components/Uploader';
 import { TwoSideUploader } from '@/components/TwoSideUploader';
+import { CameraCapture } from '@/components/CameraCapture';
 import { DuplicateReview, type ReviewItem } from '@/components/DuplicateReview';
 import { findDuplicate, mergeCards } from '@/lib/duplicates';
 import { resolveReviewJob } from '@/lib/review-jobs';
 import { getReviewHints } from '@/lib/scan-quality';
 import { CardTable } from '@/components/CardTable';
+import { DeleteConfirmDialog } from '@/components/DeleteConfirmDialog';
 import { exportCsv, exportExcel } from '@/lib/export';
 import { importContactsFile } from '@/lib/contact-import';
 import { addTags, defaultContactFilter, type ContactFilter } from '@/lib/contact-management';
@@ -71,6 +73,10 @@ export default function Dashboard() {
   const reviewJobIds = useRef(new Map<string, number>());
   const originalFiles = useRef(new Map<string, { front: File; back?: File }>());
   const [uploadBusy, setUploadBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const deletionRunning = useRef(false);
+  const [clearDialogOpen, setClearDialogOpen] = useState(false);
+  const [clearError, setClearError] = useState('');
 
   const initializeAccount = async (user: Account) => {
     setReady(false); setAuthError(''); setAccount(user); accountIdRef.current = user.id;
@@ -223,6 +229,7 @@ export default function Dashboard() {
     originalFiles.current.clear(); cardsRef.current = []; syncedRef.current = []; setCards([]); setReviews([]); setExports([]); setSection('overview');
   };
   const commitCards = (update: (previous: StoredCard[]) => StoredCard[]) => {
+    if (deletionRunning.current) { setNotice('A deletion is in progress. Wait for MongoDB confirmation.'); return; }
     if (recoverable) { setNotice('Recover or discard your pending browser changes before editing contacts.'); return; }
     const next = update(cardsRef.current);
     if (next === cardsRef.current || contactDiff(cardsRef.current, next).length === 0) return;
@@ -327,10 +334,83 @@ export default function Dashboard() {
     } finally { setUploadBusy(false); }
   };
   const onEdit = (id: string, field: EditableField, value: string) => commitCards(previous => previous.map(card => card.id === id ? { ...card, [field]: value } : card));
-  const onDelete = (id: string) => commitCards(previous => previous.filter(card => card.id !== id));
+  // Deletion is server-first, unlike ordinary field editing. Never remove a row optimistically.
+  // This also avoids a missed React effect leaving a row visible locally but still in MongoDB.
+  const deleteContacts = async (ids: string[]): Promise<boolean> => {
+    if (deletionRunning.current) return false;
+    const unique = [...new Set(ids)];
+    if (!unique.length) return true;
+    if (!ready || !accountIdRef.current || recoverable || uploadBusy || running.current ||
+        syncRunning.current || contactDiff(syncedRef.current, cardsRef.current).length > 0 || syncState !== 'saved') {
+      setNotice('Please finish cloud synchronization and any pending uploads before deleting contacts.');
+      return false;
+    }
+    const accountId = accountIdRef.current;
+    const existing = new Map(syncedRef.current.map(card => [card.id, card]));
+    if (unique.some(id => !existing.has(id))) {
+      setNotice('One or more contacts changed. Refresh the directory before deleting.');
+      return false;
+    }
+    deletionRunning.current = true;
+    setDeleting(true);
+    setSyncState('saving');
+    try {
+      for (const id of unique) {
+        if (accountIdRef.current !== accountId) throw new Error('Your account changed during deletion.');
+        const card = existing.get(id)!;
+        const response = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operations: [{ type: 'delete', id, expectedRevision: card.revision ?? 0 }] }),
+        });
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({})) as { error?: string };
+          throw new Error(result.error || `Deletion failed (${response.status}).`);
+        }
+      }
+      // An explicit re-read is essential. Don't display a successful delete on an HTTP 200 alone.
+      const verify = await fetch('/api/contacts', { cache: 'no-store' });
+      if (!verify.ok) throw new Error('MongoDB deletion verification failed. Please reload before retrying.');
+      const result = await verify.json() as { cards?: StoredCard[] };
+      if (!Array.isArray(result.cards) || result.cards.some(card => unique.includes(card.id))) {
+        throw new Error('MongoDB still returns a deleted contact. No local changes were applied.');
+      }
+      if (accountIdRef.current !== accountId) throw new Error('Your account changed during verification.');
+      syncedRef.current = result.cards;
+      cardsRef.current = result.cards;
+      setCards(result.cards);
+      try { localStorage.removeItem(`cardflow:unsynced:${accountId}`); } catch { /* no temporary backup */ }
+      setSyncState('saved');
+      setNotice(`${unique.length} contact${unique.length === 1 ? '' : 's'} deleted and verified in MongoDB.`);
+      return true;
+    } catch (error) {
+      // A bulk request can partially complete. Re-fetch the server truth instead of restoring
+      // already-deleted contacts or inventing a successful result.
+      if (accountIdRef.current === accountId) {
+        try {
+          const response = await fetch('/api/contacts', { cache: 'no-store' });
+          if (response.ok) {
+            const result = await response.json() as { cards?: StoredCard[] };
+            if (Array.isArray(result.cards)) {
+              syncedRef.current = result.cards;
+              cardsRef.current = result.cards;
+              setCards(result.cards);
+              setSyncState('saved');
+            } else setSyncState('error');
+          } else setSyncState('error');
+        } catch { setSyncState('error'); }
+      }
+      setNotice(`${error instanceof Error ? error.message : 'Deletion failed.'} The directory was refreshed where possible. Check MongoDB before trying again.`);
+      return false;
+    } finally {
+      deletionRunning.current = false;
+      setDeleting(false);
+    }
+  };
+  const onDelete = (id: string) => deleteContacts([id]);
   const onFavorite = (id: string) => commitCards(previous => previous.map(card => card.id === id ? { ...card, favorite: !card.favorite } : card));
   const onTags = (id: string, tags: string[]) => commitCards(previous => previous.map(card => card.id === id ? { ...card, tags } : card));
-  const onBulkDelete = (ids: string[]) => { const selected = new Set(ids); commitCards(previous => previous.filter(card => !selected.has(card.id))); };
+  const onBulkDelete = (ids: string[]) => deleteContacts(ids);
   const onBulkFavorite = (ids: string[], favorite: boolean) => { const selected = new Set(ids); commitCards(previous => previous.map(card => selected.has(card.id) ? { ...card, favorite } : card)); };
   const onBulkTags = (ids: string[], tags: string[]) => { const selected = new Set(ids); commitCards(previous => previous.map(card => selected.has(card.id) ? addTags(card, tags) : card)); };
   const onImport = async (file?: File) => {
@@ -410,6 +490,18 @@ export default function Dashboard() {
     </aside>
     <div className="min-w-0 lg:pl-[252px]">
       <header className="sticky top-0 z-20 flex h-[76px] items-center justify-between border-b border-slate-200 bg-white/95 px-4 backdrop-blur-md sm:px-8"><div className="flex items-center gap-3"><button onClick={() => setMobileNav(true)} aria-label="Open navigation" className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 lg:hidden"><Menu className="size-5" /></button><span className="hidden text-xs font-semibold text-slate-400 sm:inline">Workspace</span><ChevronRight className="hidden size-3.5 text-slate-300 sm:inline" /><span className="text-sm font-bold">{titles[section].heading}</span></div><div className="flex items-center gap-3"><span className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 sm:inline-flex"><span className="size-1.5 rounded-full bg-emerald-500" /> {syncState === 'saved' ? 'Cloud saved' : syncState === 'saving' ? 'Syncing…' : 'Sync failed'}</span><button onClick={() => open('scan')} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-3 py-2.5 text-xs font-bold text-white hover:bg-blue-700 sm:px-4"><Plus className="size-4" /> Scan cards</button></div></header>
+      {clearDialogOpen && <DeleteConfirmDialog
+        title={`Delete all ${cards.length} contacts?`}
+        description="This permanently removes every contact in this account from MongoDB. This cannot be undone. Only confirmed deletions will disappear from the directory."
+        busy={deleting}
+        error={clearError}
+        onCancel={() => { if (!deleting) { setClearDialogOpen(false); setClearError(''); } }}
+        onConfirm={async () => {
+          const ok = await deleteContacts(cardsRef.current.map(card => card.id));
+          if (ok) { setClearDialogOpen(false); setClearError(''); }
+          else setClearError('Not every deletion could be confirmed. Review the current directory and the message above before retrying.');
+        }}
+      />}
       <main className="mx-auto max-w-[1500px] space-y-6 px-4 py-7 sm:px-8 sm:py-9">
         <div className="flex flex-wrap items-end justify-between gap-4"><div><div className="mb-2 inline-flex items-center gap-2 text-xs font-bold text-blue-600"><Sparkles className="size-3.5" /> AI-POWERED CONTACT MANAGEMENT</div><h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">{titles[section].heading}</h1><p className="mt-2 text-sm text-slate-500">{titles[section].subtitle}</p></div>{section === 'contacts' && exportButtons()}</div>
         {syncState === 'error' && <button className="rounded-xl bg-amber-100 px-4 py-2 text-sm font-bold text-amber-900" onClick={() => void retrySyncRef.current()}>Retry sync with MongoDB</button>}{recoverable && <div className="flex flex-wrap items-center gap-3 rounded-xl bg-blue-50 p-3"><button className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white" onClick={recoverUnsynced}>Recover unsynced browser changes</button><button className="text-sm font-semibold text-slate-600 underline" onClick={discardRecovery}>Discard backup and keep cloud data</button></div>}{notice && <div role="alert" className="flex items-start justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><span>{notice}</span><button onClick={() => setNotice(null)} aria-label="Dismiss alert"><X className="size-4" /></button></div>}
@@ -423,10 +515,10 @@ export default function Dashboard() {
           <section className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4 sm:p-5" aria-label="Free OCR information">
             <div className="flex items-start gap-3"><ScanLine className="mt-0.5 size-5 shrink-0 text-blue-700" /><div><h2 className="text-sm font-bold text-slate-900">Free OCR · Runs in your browser</h2><p className="mt-1 text-xs leading-5 text-slate-600">No Gemini, OpenAI, or paid OCR credits. The model downloads on first use; scanning uses your device. Check extracted details before saving—names and companies may need corrections.</p></div></div>
           </section>
-          <Uploader processing={processingCount > 0} onFiles={onFiles} onError={setNotice} /><TwoSideUploader processing={processingCount > 0} onScan={onPair} onError={setNotice} />{progressPanel}<DuplicateReview pending={reviews} cards={cards} onDecide={(id, action) => { void onDecide(id, action); }} /><div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><h3 className="font-bold">Ready to review?</h3><p className="mt-1 text-xs text-slate-500">{cards.length} contact{cards.length === 1 ? '' : 's'} currently saved in your directory.</p></div><button onClick={() => open('contacts')} className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold hover:bg-slate-50">View contacts <ArrowRight className="size-4" /></button></div></>}
+          <CameraCapture processing={processingCount > 0} onScan={onPair} onError={setNotice} /><Uploader processing={processingCount > 0} onFiles={onFiles} onError={setNotice} /><TwoSideUploader processing={processingCount > 0} onScan={onPair} onError={setNotice} />{progressPanel}<DuplicateReview pending={reviews} cards={cards} onDecide={(id, action) => { void onDecide(id, action); }} /><div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><h3 className="font-bold">Ready to review?</h3><p className="mt-1 text-xs text-slate-500">{cards.length} contact{cards.length === 1 ? '' : 's'} currently saved in your directory.</p></div><button onClick={() => open('contacts')} className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold hover:bg-slate-50">View contacts <ArrowRight className="size-4" /></button></div></>}
         {section === 'contacts' && <><div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4"><div className="relative min-w-[220px] flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name, company, email, phone…" aria-label="Search contacts" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm outline-none focus:border-blue-400 focus:bg-white" /></div><input ref={importRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" aria-label="Import contacts file" onChange={event => void onImport(event.target.files?.[0])} />
         <button type="button" disabled={importing} onClick={() => importRef.current?.click()} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"><FileUp className="size-4" /> {importing ? 'Importing…' : 'Import CSV / Excel'}</button>
-        <span className="rounded-full bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">{cards.length} contacts</span>{reviews.length>0 && <button onClick={() => open('scan')} className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">{reviews.length} duplicate{reviews.length!==1?'s':''} to review</button>}<button disabled={!cards.length} onClick={() => { if (window.confirm(`Permanently delete all ${cards.length} contacts in your MongoDB account?`)) commitCards(() => []); }} className="inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-30"><Trash2 className="size-4" /> Clear all</button></div><div className="flex flex-wrap gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <span className="rounded-full bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">{cards.length} contacts</span>{reviews.length>0 && <button onClick={() => open('scan')} className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">{reviews.length} duplicate{reviews.length!==1?'s':''} to review</button>}<button disabled={!cards.length || deleting} onClick={() => { setClearError(''); setClearDialogOpen(true); }} className="inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-30"><Trash2 className="size-4" /> Clear all</button></div><div className="flex flex-wrap gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><Star className="size-4"/><input type="checkbox" checked={contactFilter.favorite} onChange={e => setContactFilter(old => ({ ...old, favorite: e.target.checked }))} /> Favourites only</label>
           <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Verification<select aria-label="Filter by review status" value={contactFilter.review} onChange={e => setContactFilter(old => ({ ...old, review: e.target.value as ContactFilter['review'] }))} className="rounded-lg border border-slate-200 bg-white px-3 py-2"><option value="all">All</option><option value="pending">Not reviewed</option><option value="reviewed">Reviewed</option></select></label>
           <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Clarity<select aria-label="Filter by clarity" value={contactFilter.confidence} onChange={e => setContactFilter(old => ({ ...old, confidence: e.target.value as ContactFilter['confidence'] }))} className="rounded-lg border border-slate-200 bg-white px-3 py-2"><option value="all">All</option><option>High</option><option>Medium</option><option>Low</option></select></label>
@@ -434,7 +526,7 @@ export default function Dashboard() {
           <label className="flex items-center gap-2 text-xs font-semibold text-slate-600"><Tags className="size-4"/>Tag<select aria-label="Filter by tag" value={contactFilter.tag} onChange={e => setContactFilter(old => ({ ...old, tag: e.target.value }))} className="max-w-36 rounded-lg border border-slate-200 bg-white px-3 py-2"><option value="">All tags</option>{[...new Set(cards.flatMap(card => card.tags ?? []))].sort().map(tag => <option key={tag}>{tag}</option>)}</select></label>
           <button type="button" onClick={() => { setSearch(''); setContactFilter(defaultContactFilter); }} className="ml-auto text-xs font-semibold text-blue-600">Reset filters</button>
         </div>
-        <CardTable cards={cards} search={search} filter={contactFilter} onEdit={onEdit} onDelete={onDelete} onReviewed={onReviewed} onFavorite={onFavorite} onTags={onTags} onBulkDelete={onBulkDelete} onBulkFavorite={onBulkFavorite} onBulkTags={onBulkTags} processingCount={processingCount} onScan={() => open('scan')} /></>}
+        <CardTable cards={cards} search={search} filter={contactFilter} onEdit={onEdit} onDelete={onDelete} onReviewed={onReviewed} onFavorite={onFavorite} onTags={onTags} onBulkDelete={onBulkDelete} onBulkFavorite={onBulkFavorite} onBulkTags={onBulkTags} processingCount={processingCount} deleting={deleting} onScan={() => open('scan')} /></>}
         {section === 'exports' && <><div className="grid gap-5 md:grid-cols-2"><section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><span className="inline-flex rounded-xl bg-blue-50 p-3 text-blue-600"><FileText className="size-6" /></span><h2 className="mt-5 text-lg font-bold">CSV spreadsheet</h2><p className="mt-2 text-sm leading-6 text-slate-500">A lightweight, Excel-compatible CSV file with all saved contact fields.</p><button disabled={!cards.length} onClick={downloadCsv} className="mt-6 inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-bold hover:bg-slate-50 disabled:opacity-40"><Download className="size-4" /> Download CSV</button></section><section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><span className="inline-flex rounded-xl bg-emerald-50 p-3 text-emerald-600"><FileSpreadsheet className="size-6" /></span><h2 className="mt-5 text-lg font-bold">Formatted Excel workbook</h2><p className="mt-2 text-sm leading-6 text-slate-500">An XLSX file with styled headers, adjusted column widths, and filters.</p><button disabled={!cards.length || exporting} onClick={() => void downloadExcel()} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-40">{exporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}{exporting ? 'Preparing…' : 'Download Excel'}</button></section></div>
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-bold">Export activity on this device</h2><p className="mt-1 text-xs text-slate-500">Recent downloads initiated in this browser, not a cloud backup.</p></div><span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-500">{exports.length} recent</span></div>{exports.length ? <div className="mt-5 divide-y divide-slate-100">{exports.map(record => <div key={record.id} className="flex items-center gap-3 py-3"><div className="rounded-xl bg-slate-100 p-2.5">{record.kind === 'CSV' ? <FileText className="size-4" /> : <FileSpreadsheet className="size-4" />}</div><div className="flex-1"><p className="text-sm font-semibold">{record.kind} export</p><p className="text-xs text-slate-500">{record.count} contacts</p></div><span className="text-xs text-slate-400">{prettyTime(record.date)}</span></div>)}</div> : <div className="flex flex-col items-center py-12 text-center"><Clock3 className="size-7 text-slate-300" /><p className="mt-3 text-sm font-semibold">No exports recorded yet</p><p className="mt-1 text-xs text-slate-400">Your export activity will appear here after your first download.</p></div>}</section><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-600" /> Your contacts are stored in MongoDB. Export a separate backup regularly.</p></>}
         <footer className="flex flex-wrap items-center justify-between gap-3 pb-4 pt-2 text-xs text-slate-400"><span className="inline-flex items-center gap-2"><CheckCircle2 className="size-4 text-emerald-600" />{syncState === 'saved' ? 'Saved to your MongoDB account' : syncState === 'saving' ? 'Saving to MongoDB…' : 'Cloud sync needs attention'}</span><span className="inline-flex items-center gap-2"><TrendingUp className="size-4" /> CardFlow · Smart Contact Extraction</span></footer>

@@ -1,0 +1,46 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const root = path.resolve(__dirname, '..');
+const component = fs.readFileSync(path.join(root, 'src/components/CameraCapture.tsx'), 'utf8');
+const page = fs.readFileSync(path.join(root, 'src/app/page.tsx'), 'utf8');
+
+test('camera integrates with existing two-sided scan queue', () => {
+  assert.match(page, /import \{ CameraCapture \} from '@\/components\/CameraCapture'/);
+  assert.match(page, /<CameraCapture processing=\{processingCount > 0\} onScan=\{onPair\} onError=\{setNotice\}/);
+  assert.match(page, /<TwoSideUploader processing=\{processingCount > 0\} onScan=\{onPair\}/);
+});
+
+test('camera requests a permission-based video stream and stops tracks', () => {
+  assert.match(component, /navigator\.mediaDevices\.getUserMedia/);
+  assert.match(component, /getTracks\(\)\.forEach\(track => track\.stop\(\)\)/);
+  assert.match(component, /window\.isSecureContext/);
+  assert.match(component, /operation\.current !== ticket/);
+  assert.match(component, /playsInline/);
+});
+
+test('captured photos are converted to File objects without a paid service', () => {
+  assert.match(component, /canvas\.toBlob/);
+  assert.match(component, /new File\(\[blob\]/);
+  assert.match(component, /validateImage\(file\)/);
+  assert.match(component, /onScan\(captured\.current\.front\.file, captured\.current\.back\?\.file\)/);
+  assert.doesNotMatch(component, /\/api\/extract-card|gemini|openai/i);
+});
+
+test('front and optional back are retakable, and previews are released', () => {
+  assert.match(component, /aria-label=\{`Retake \${target}`\}/);
+  assert.match(component, /URL\.revokeObjectURL/);
+  assert.match(component, /target === 'front'/);
+  assert.match(component, /nativeInput\.current\?\.click\(\)/);
+  assert.match(component, /capture="environment"/);
+});
+
+test('camera UI includes failure handling, accessible dialog and disabled scan while busy', () => {
+  assert.match(component, /role="dialog" aria-modal="true"/);
+  assert.match(component, /role="alert"/);
+  assert.match(component, /disabled=\{!front \|\| processing \|\| busy\}/);
+  assert.match(component, /NotAllowedError/);
+  assert.match(component, /NotFoundError/);
+});

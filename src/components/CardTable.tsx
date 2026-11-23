@@ -3,20 +3,22 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, ArrowUpDown, Star, Tag, Copy, ExternalLink, FileImage, Mail, Eye, Phone, SearchX, Trash2, X } from 'lucide-react';
 import { filterContacts, addTags, type ContactFilter } from '@/lib/contact-management';
 import { getReviewHints } from '@/lib/scan-quality';
+import { DeleteConfirmDialog } from '@/components/DeleteConfirmDialog';
 import { editableFields, type EditableField, type StoredCard } from '@/types/card';
 
 interface Props {
   cards: StoredCard[];
   search: string;
   filter: ContactFilter;
-  onBulkDelete: (ids: string[]) => void;
+  onBulkDelete: (ids: string[]) => Promise<boolean>;
   onBulkFavorite: (ids: string[], favorite: boolean) => void;
   onBulkTags: (ids: string[], tags: string[]) => void;
   onFavorite: (id: string) => void;
   onTags: (id: string, tags: string[]) => void;
   onEdit: (id: string, field: EditableField, value: string) => void;
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => Promise<boolean>;
   onReviewed: (id: string) => void;
+  deleting: boolean;
   processingCount: number;
   onScan?: () => void;
 }
@@ -27,12 +29,14 @@ const labels: Record<EditableField, string> = {
 type SortKey = EditableField | 'createdAt' | 'confidenceScore';
 const priorities: EditableField[] = ['fullName', 'companyName', 'email', 'phone'];
 
-export function CardTable({ cards, search, filter, onBulkDelete, onBulkFavorite, onBulkTags, onFavorite, onTags, onEdit, onDelete, onReviewed, processingCount, onScan }: Props) {
+export function CardTable({ cards, search, filter, onBulkDelete, onBulkFavorite, onBulkTags, onFavorite, onTags, onEdit, onDelete, onReviewed, processingCount, deleting, onScan }: Props) {
   const [sort, setSort] = useState<{ key: SortKey; direction: 'asc' | 'desc' }>({ key: 'createdAt', direction: 'desc' });
   const [selected, setSelected] = useState<string | null>(null);
   const [checked, setChecked] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ ids: string[]; label: string } | null>(null);
+  const [deleteError, setDeleteError] = useState('');
   const current = cards.find(card => card.id === selected);
   const visible = useMemo(() => {
     return filterContacts(cards, search, filter)
@@ -43,7 +47,27 @@ export function CardTable({ cards, search, filter, onBulkDelete, onBulkFavorite,
   const visibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.includes(id));
   const toggleAll = () => setChecked(old => visibleSelected ? old.filter(id => !visibleIds.includes(id)) : [...new Set([...old, ...visibleIds])]);
   const toggleOne = (id: string) => setChecked(old => old.includes(id) ? old.filter(item => item !== id) : [...old, id]);
-  const bulkDelete = () => { if (selectedIds.length && window.confirm(`Delete ${selectedIds.length} selected contacts? This cannot be undone.`)) { onBulkDelete(selectedIds); setChecked([]); } };
+  const bulkDelete = () => {
+    if (selectedIds.length && !deleting) {
+      setDeleteError('');
+      setDeleteTarget({ ids: [...selectedIds], label: `${selectedIds.length} selected contacts` });
+    }
+  };
+  const confirmDeletion = async () => {
+    if (!deleteTarget || deleting) return;
+    const ids = deleteTarget.ids;
+    try {
+      const ok = ids.length === 1 ? await onDelete(ids[0]) : await onBulkDelete(ids);
+      if (ok) {
+        setChecked(previous => previous.filter(id => !ids.includes(id)));
+        setDeleteTarget(null);
+        setDeleteError('');
+        if (ids.includes(selected || '')) setSelected(null);
+      } else setDeleteError('Deletion was not confirmed. Your contact directory has been preserved or refreshed. Check the message above and try again.');
+    } catch {
+      setDeleteError('Deletion failed. Please check your connection and try again.');
+    }
+  };
   const bulkTags = () => { const tags = tagInput.split(/[;,]/).map(v => v.trim()).filter(Boolean); if (!tags.length) return; onBulkTags(selectedIds, tags); setTagInput(''); };
   const toggleSort = (key: SortKey) => setSort(old => ({ key, direction: old.key === key && old.direction === 'asc' ? 'desc' : 'asc' }));
   useEffect(() => {
@@ -59,6 +83,14 @@ export function CardTable({ cards, search, filter, onBulkDelete, onBulkFavorite,
     {name}{sort.key === key ? sort.direction === 'asc' ? <ArrowUp className="size-3.5" /> : <ArrowDown className="size-3.5" /> : <ArrowUpDown className="size-3.5 opacity-40" />}
   </button>;
   return <>
+    {deleteTarget && <DeleteConfirmDialog
+      title={`Delete ${deleteTarget.label}?`}
+      description="The selected contact records will be permanently removed from MongoDB. This cannot be undone. The page will verify the change before removing them from the table."
+      busy={deleting}
+      error={deleteError}
+      onCancel={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(''); } }}
+      onConfirm={confirmDeletion}
+    />}
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-5 sm:px-6">
         <div><h2 className="text-base font-bold text-slate-900">Contact directory</h2><p className="mt-1 text-xs text-slate-500">Edit the key fields directly, or open a record to verify the full card.</p></div>
@@ -70,7 +102,7 @@ export function CardTable({ cards, search, filter, onBulkDelete, onBulkFavorite,
         <button type="button" onClick={() => onBulkFavorite(selectedIds, false)} className="rounded-lg border border-blue-200 bg-white px-3 py-2 font-semibold">Remove favourite</button>
         <input type="text" value={tagInput} onChange={e => setTagInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') bulkTags(); }} placeholder="Tag selected contacts" aria-label="Tags for selected contacts" className="min-w-36 rounded-lg border border-blue-200 px-3 py-2 outline-none" />
         <button type="button" onClick={bulkTags} className="rounded-lg bg-blue-600 px-3 py-2 font-semibold text-white">Add tags</button>
-        <button type="button" onClick={bulkDelete} className="rounded-lg border border-rose-200 bg-white px-3 py-2 font-semibold text-rose-600">Delete selected</button>
+        <button type="button" onClick={bulkDelete} disabled={deleting} className="rounded-lg border border-rose-200 bg-white px-3 py-2 font-semibold text-rose-600">Delete selected</button>
         <button type="button" onClick={() => setChecked([])} className="ml-auto text-slate-500 hover:text-slate-900">Clear selection</button>
       </div>}
       {cards.length === 0 && processingCount === 0 ? <div className="flex min-h-72 flex-col items-center justify-center p-8 text-center">
@@ -92,7 +124,7 @@ export function CardTable({ cards, search, filter, onBulkDelete, onBulkFavorite,
               </button></td>
               {priorities.map(key => <td key={key} className="max-w-[215px] px-2 py-3"><input type="text" value={card[key]} onChange={event => onEdit(card.id, key, event.target.value)} aria-label={`${labels[key]} for ${card.fullName || card.sourceName}`} title={card[key]} placeholder="—" className={`w-full min-w-0 rounded-lg border border-transparent bg-transparent px-2 py-2 text-sm outline-none hover:border-slate-200 focus:border-blue-400 focus:bg-white ${key === 'fullName' ? 'font-semibold text-slate-900' : 'text-slate-600'}`} /></td>)}
               <td className="px-3 py-3"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${card.confidenceScore === 'High' ? 'bg-emerald-50 text-emerald-700' : card.confidenceScore === 'Medium' ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'}`}>{card.confidenceScore}</span></td>
-              <td className="px-4 py-3"><div className="flex items-center justify-end gap-1"><button type="button" onClick={() => onFavorite(card.id)} aria-label={`${card.favorite ? 'Remove from' : 'Add to'} favourites: ${card.fullName}`} title="Toggle favourite" className="rounded-lg p-2 hover:bg-amber-50"><Star className={`size-4 ${card.favorite ? 'fill-amber-400 text-amber-500' : 'text-slate-400'}`} /></button><button type="button" onClick={() => setSelected(card.id)} aria-label={`View ${card.fullName || card.sourceName}`} title="View contact" className="rounded-lg p-2 text-slate-500 hover:bg-blue-50 hover:text-blue-700"><Eye className="size-4" /></button><button type="button" onClick={() => { if (window.confirm(`Delete ${card.fullName || card.sourceName}?`)) onDelete(card.id); }} aria-label={`Delete ${card.fullName}`} className="rounded-lg p-2 text-slate-500 hover:bg-rose-50 hover:text-rose-600"><Trash2 className="size-4" /></button></div></td>
+              <td className="px-4 py-3"><div className="flex items-center justify-end gap-1"><button type="button" onClick={() => onFavorite(card.id)} aria-label={`${card.favorite ? 'Remove from' : 'Add to'} favourites: ${card.fullName}`} title="Toggle favourite" className="rounded-lg p-2 hover:bg-amber-50"><Star className={`size-4 ${card.favorite ? 'fill-amber-400 text-amber-500' : 'text-slate-400'}`} /></button><button type="button" onClick={() => setSelected(card.id)} aria-label={`View ${card.fullName || card.sourceName}`} title="View contact" className="rounded-lg p-2 text-slate-500 hover:bg-blue-50 hover:text-blue-700"><Eye className="size-4" /></button><button type="button" onClick={() => { setDeleteError(''); setDeleteTarget({ ids: [card.id], label: card.fullName || card.sourceName }); }} disabled={deleting} aria-label={`Delete ${card.fullName}`} className="rounded-lg p-2 text-slate-500 hover:bg-rose-50 hover:text-rose-600"><Trash2 className="size-4" /></button></div></td>
             </tr>)}
             {Array.from({ length: processingCount }).map((_, i) => <tr key={`pending-${i}`}><td colSpan={8} className="px-5 py-3"><div className="h-10 animate-pulse rounded-lg bg-slate-100" /></td></tr>)}
           </tbody>
