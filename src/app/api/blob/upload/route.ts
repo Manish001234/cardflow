@@ -5,6 +5,12 @@ import { MAX_IMAGE_BYTES, validImagePath } from '@/lib/blob-policy';
 import { getDb, ensureIndexes } from '@/lib/server/db';
 import { ObjectId } from 'mongodb';
 
+type BlobUploadLimit = {
+  _id: string;
+  count: number;
+  expiresAt: Date;
+};
+
 export const runtime = 'nodejs';
 export async function POST(request: NextRequest) {
   try {
@@ -21,7 +27,7 @@ export async function POST(request: NextRequest) {
         if (!viewer) throw new Error('Sign in required.');
         await ensureIndexes();
         const minute = Math.floor(Date.now() / 60000);
-        const limit = await (await getDb()).collection('blob_upload_limits').findOneAndUpdate(
+        const limit = await (await getDb()).collection<BlobUploadLimit>('blob_upload_limits').findOneAndUpdate(
           { _id: `${viewer.id}:${minute}` },
           { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(Date.now() + 2 * 3600_000) } },
           { upsert: true, returnDocument: 'after' });
