@@ -7,6 +7,7 @@ import { ensureIndexes, getDb } from '@/lib/server/db';
 import { apiError, serverError } from '@/lib/server/http';
 import { cardSchema, type StoredCard } from '@/types/card';
 import { IMAGE_MIMES, MAX_IMAGE_BYTES, validImagePath } from '@/lib/blob-policy';
+import { normalizeStoredContact } from '@/lib/contact-integrity';
 type ContactDocument = Omit<StoredCard, 'revision'> & { userId: ObjectId; revision?: number | null };
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -60,7 +61,20 @@ export async function GET() {
   try {
     const viewer = await getViewer(); if (!viewer) return apiError('Sign in required.', 401);
     const results = await (await getDb()).collection('contacts').find({ userId: new ObjectId(viewer.id) }, { projection }).sort({ createdAt: -1 }).limit(10000).toArray();
-    const cards = results.map(record => stored.safeParse(record)).filter(result => result.success).map(result => toClient(result.data));
+    const cards: StoredCard[] = [];
+    for (const record of results) {
+      const parsed = stored.safeParse(normalizeStoredContact(record));
+      if (!parsed.success) {
+        // Never silently hide MongoDB records: a partial 200 could make users believe contacts vanished.
+        // Log only a record identifier and invalid field paths, never the contact's personal data.
+        console.error('CardFlow contact read validation failed', {
+          contactId: typeof record.id === 'string' ? record.id : 'unknown',
+          fields: parsed.error.issues.map(issue => issue.path.join('.')),
+        });
+        return apiError('One or more saved contacts could not be loaded. Data remains in MongoDB; contact support before making changes.', 500);
+      }
+      cards.push(toClient(parsed.data));
+    }
     return NextResponse.json({ cards }, { headers: { 'Cache-Control': 'private, no-store' } });
   } catch (error) { return serverError(error); }
 }

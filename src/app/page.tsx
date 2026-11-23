@@ -14,6 +14,7 @@ import { addTags, defaultContactFilter, type ContactFilter } from '@/lib/contact
 import { prepareImage } from '@/lib/images';
 import { AuthGate, type Account } from '@/components/AuthGate';
 import { contactDiff } from '@/lib/cloud-sync';
+import { missingCloudContactIds } from '@/lib/contact-integrity';
 import { uploadOriginals } from '@/lib/cloud-images';
 import type { EditableField, ExtractResponse, StoredCard } from '@/types/card';
 
@@ -118,10 +119,22 @@ export default function Dashboard() {
     if (syncRunning.current || !ready || !accountIdRef.current || recoverable) return;
     syncRunning.current = true;
     const accountId = accountIdRef.current;
+    let wroteToCloud = false;
     try {
       while (accountIdRef.current === accountId) {
         const operations = contactDiff(syncedRef.current, cardsRef.current);
         if (!operations.length) {
+          if (wroteToCloud) {
+            const check = await fetch('/api/contacts', { cache: 'no-store' });
+            if (!check.ok) throw new Error('Save verification failed: cloud contacts could not be reloaded.');
+            const snapshot = await check.json() as { cards?: StoredCard[] };
+            if (!Array.isArray(snapshot.cards)) throw new Error('Save verification failed: invalid cloud response.');
+            if (missingCloudContactIds(syncedRef.current, snapshot.cards).length) {
+              throw new Error('Save verification failed: MongoDB did not return all acknowledged contacts.');
+            }
+            // An edit may have arrived while the verification request was in flight.
+            if (contactDiff(syncedRef.current, cardsRef.current).length) continue;
+          }
           try { localStorage.removeItem(`cardflow:unsynced:${accountId}`); } catch { /* no backup was stored */ }
           setRecoverable(false);
           setSyncState('saved');
@@ -153,6 +166,7 @@ export default function Dashboard() {
             } else confirmed.delete(operation.id);
           }
           syncedRef.current = [...confirmed.values()];
+          wroteToCloud = true;
         }
       }
     } catch (error) {
@@ -209,6 +223,13 @@ export default function Dashboard() {
   const commitCards = (update: (previous: StoredCard[]) => StoredCard[]) => {
     if (recoverable) { setNotice('Recover or discard your pending browser changes before editing contacts.'); return; }
     const next = update(cardsRef.current);
+    if (next === cardsRef.current || contactDiff(cardsRef.current, next).length === 0) return;
+    // Write recovery before changing React state; a refresh immediately after editing must not lose data.
+    if (accountIdRef.current) {
+      try { localStorage.setItem(`cardflow:unsynced:${accountIdRef.current}`, JSON.stringify(next)); }
+      catch { setNotice('Could not create a local safety copy. Keep this tab open until the cloud save completes.'); }
+    }
+    setSyncState('saving');
     cardsRef.current = next;
     setCards(next);
   };
@@ -291,7 +312,7 @@ export default function Dashboard() {
       setReviews(previous => previous.filter(review => review.candidate.id !== candidateId));
       const completedJobId = resolveReviewJob(reviewJobIds.current, candidateId);
       if (completedJobId !== null) updateJob(completedJobId, 'done');
-      setNotice(action === 'skip' ? 'New scan discarded; existing contact preserved.' : `Duplicate review completed: ${action}.`);
+      setNotice(action === 'skip' ? 'New scan discarded; existing contact preserved.' : `Duplicate review ${action} queued. Wait for Cloud saved before refreshing.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not save original image; review remains pending.');
     } finally { setUploadBusy(false); }
