@@ -14,15 +14,25 @@ function similarity(left: string, right: string): number {
   const common = a.filter(word => b.includes(word)).length;
   return common / Math.max(a.length, b.length);
 }
+// Shared generic addresses are not reliable evidence that two people match.
+const SHARED_LOCAL = /^(?:hello|info|contact|admin|office|sales|support|enquiries|inquiries|team|help|reception|mail|business|service|customerservice|noreply|no-reply)$/i;
+const personalEmails = (value: string) => emails(value).filter(address => !SHARED_LOCAL.test(address.split('@')[0]));
 /** Suggestions only. No contacts are ever deleted or merged automatically. */
 export function findDuplicate(candidate: StoredCard, existing: StoredCard[]): DuplicateMatch | null {
-  const candidateEmails = emails(candidate.email), candidatePhones = phones(candidate.phone);
+  const candidateEmails = personalEmails(candidate.email), candidatePhones = phones(candidate.phone);
   let probable: DuplicateMatch | null = null;
   for (const card of existing) {
     if (card.id === candidate.id) continue;
-    if (candidateEmails.length && overlap(candidateEmails, emails(card.email))) return { existingId: card.id, strength: 'exact', reason: 'Matching email address' };
-    if (candidatePhones.some(phone => phones(card.phone).some(other => phoneMatches(phone, other)))) return { existingId: card.id, strength: 'exact', reason: 'Matching phone number' };
-    const name = similarity(norm(candidate.fullName), norm(card.fullName));
+    const candidateName = norm(candidate.fullName), existingName = norm(card.fullName);
+    const namesConflict = Boolean(candidateName && existingName && similarity(candidateName, existingName) < 0.65);
+    // An exact email or phone is not sufficient to merge visibly different people.
+    if (!namesConflict && candidateEmails.length && overlap(candidateEmails, personalEmails(card.email))) {
+      return { existingId: card.id, strength: 'exact', reason: 'Matching email address' };
+    }
+    if (!namesConflict && candidatePhones.some(phone => phones(card.phone).some(other => phoneMatches(phone, other)))) {
+      return { existingId: card.id, strength: 'exact', reason: 'Matching phone number' };
+    }
+    const name = similarity(candidateName, existingName);
     const company = similarity(norm(candidate.companyName), norm(card.companyName));
     if (name === 1 && company === 1 && name > 0) return { existingId: card.id, strength: 'exact', reason: 'Same name and company' };
     if (name >= 0.65 && company >= 0.65 && !probable) probable = { existingId: card.id, strength: 'probable', reason: 'Similar name and company' };

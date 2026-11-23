@@ -45,11 +45,11 @@ test('CSV imports conservative Low clarity if not supplied', () => {
   const result = importCsvText('Full Name,Email,Confidence Score\nAda,ada@example.org,High\nBob,bob@example.org,');
   assert.deepEqual(result.contacts.map(c=>c.confidenceScore),['High','Low']);
 });
-test('legacy storage key and Gemini endpoint stay unchanged', () => {
+test('legacy storage key retained; no server OCR', () => {
   const storage = fs.readFileSync(path.resolve(root,'storage.ts'),'utf8');
   const api = fs.readFileSync(path.resolve(root,'../app/api/extract-card/route.ts'),'utf8');
   assert.match(storage,/visiting-card-ocr:v1/); assert.match(storage,/tags: z.array\(z.string\(\)\).optional\(\)/);
-  assert.match(api,/GEMINI_API_KEY/);
+  assert.match(api,/status: 410/);
 });
 test('Excel export includes extra columns for contact metadata', () => {
   const exportSource = fs.readFileSync(path.resolve(root,'export.ts'),'utf8');

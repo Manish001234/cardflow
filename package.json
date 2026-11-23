@@ -1,6 +1,6 @@
 {
   "name": "visiting-card-ocr",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -17,11 +17,11 @@
     "zod": "^4.0.0",
     "lucide-react": "^0.468.0",
     "exceljs": "^4.4.0",
-    "@google/genai": "^1.0.0",
     "mongodb": "^6.20.0",
     "bcryptjs": "^3.0.2",
     "server-only": "^0.0.1",
-    "@vercel/blob": "^2.9.0"
+    "@vercel/blob": "^2.9.0",
+    "@paddleocr/paddleocr-js": "^0.4.2"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

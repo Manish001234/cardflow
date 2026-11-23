@@ -5,7 +5,7 @@ const path = require('node:path');
 const read = file => fs.readFileSync(path.resolve(__dirname, '../src/',file),'utf8');
 test('per-user contact filter exists for GET', () => assert.match(read('app/api/contacts/route.ts'), /find\(\{ userId: new ObjectId\(viewer\.id\) \}/));
 test('per-user contact filter exists for upsert and delete', () => {const src=read('app/api/contacts/route.ts'); assert.match(src,/findOneAndDelete\(\{ userId, id: op\.id, revision:/); assert.match(src,/replaceOne\(\{ userId, id: card\.id, revision:/);});
-test('Gemini endpoint requires a user session', () => assert.match(read('app/api/extract-card/route.ts'), /await getViewer\(\)/));
+test('server OCR cannot be used and private images still require authentication', () => { assert.match(read('app/api/extract-card/route.ts'), /status: 410/); assert.match(read('app/api/blob/upload/route.ts'), /getViewer/); });
 test('legacy storage key is retained', () => assert.match(read('lib/storage.ts'), /visiting-card-ocr:v1/));
 test('session cookie is httpOnly and secure in production', () => {const src=read('lib/server/auth.ts');assert.match(src,/httpOnly: true/);assert.match(src,/secure: process\.env\.NODE_ENV === 'production'/);});
 test('session token stored in Mongo as a hash', () => assert.match(read('lib/server/auth.ts'), /tokenHash: hash\(token\)/));

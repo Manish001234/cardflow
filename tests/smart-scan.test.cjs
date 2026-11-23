@@ -63,11 +63,10 @@ test('legacy localStorage schema key remains unchanged', () => {
   assert.ok(storage.includes("const KEY = 'visiting-card-ocr:v1'"));
   assert.ok(storage.includes('backPreview: z.string().optional()'));
 });
-test('Gemini endpoint retains single-image contract and adds optional backImage', () => {
-  const endpoint = fs.readFileSync(path.resolve(__dirname,'../src/app/api/extract-card/route.ts'),'utf8');
-  assert.ok(endpoint.includes("form.getAll('image')"));
-  assert.ok(endpoint.includes("form.getAll('backImage')"));
-  assert.ok(endpoint.includes("new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })"));
+test('browser OCR accepts front/back without paid OCR request', () => {
+  const page = fs.readFileSync(path.resolve(__dirname,'../src/app/page.tsx'),'utf8');
+  assert.ok(page.includes('extractBrowserCard(prepared.upload, preparedBack?.upload)'));
+  assert.ok(!page.includes("fetch('/api/extract-card'"));
 });
 
 const { resolveReviewJob } = loadModule('review-jobs');
