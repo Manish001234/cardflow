@@ -7,6 +7,7 @@ import { ensureIndexes, getDb } from '@/lib/server/db';
 import { apiError, serverError } from '@/lib/server/http';
 import { cardSchema, type StoredCard } from '@/types/card';
 import { IMAGE_MIMES, MAX_IMAGE_BYTES, validImagePath } from '@/lib/blob-policy';
+type ContactDocument = StoredCard & { userId: ObjectId };
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 const image = z.object({ pathname: z.string().max(300), size: z.number().int().min(1).max(MAX_IMAGE_BYTES), contentType: z.enum(IMAGE_MIMES) }).strict();
@@ -72,13 +73,13 @@ export async function POST(request: NextRequest) {
     const parsed = operations.safeParse(JSON.parse(raw));
     if (!parsed.success) return apiError('Invalid contact update payload.', 400);
     await ensureIndexes();
-    const collection = (await getDb()).collection('contacts');
+    const collection = (await getDb()).collection<ContactDocument>('contacts');
     const userId = new ObjectId(viewer.id);
     const op = parsed.data.operations[0];
     if (op.type === 'delete') {
       const oldRecord = await collection.findOneAndDelete({ userId, id: op.id, revision: revisionMatch(op.expectedRevision) });
       if (!oldRecord) return apiError('Conflict: contact changed on another device. Reload before deleting.', 409);
-      await cleanupImages(oldRecord as StoredCard);
+      await cleanupImages(oldRecord);
       return NextResponse.json({ ok: true });
     }
     const { card } = op;
@@ -103,7 +104,7 @@ export async function POST(request: NextRequest) {
       throw error;
     }
     // Deleting a blob is best-effort; durable cleanup records handle failures.
-    await cleanupImages(current as StoredCard | null, card);
+    await cleanupImages(current, card);
     return NextResponse.json({ ok: true, revision: newRevision });
   } catch (error) {
     if (error instanceof SyntaxError) return apiError('Invalid JSON.', 400);
