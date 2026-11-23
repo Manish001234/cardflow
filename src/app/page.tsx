@@ -27,6 +27,7 @@ interface Job { id: number; name: string; state: JobState | 'review'; error?: st
 interface ExportLog { id: string; kind: 'CSV' | 'Excel'; count: number; date: string; }
 const EXPORT_KEY = 'cardflow:exports:v1';
 const REVIEW_KEY = 'cardflow:duplicate-review:v1';
+const CAMERA_PENDING_KEY = 'cardflow:camera-pending:v1';
 const navigation = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'scan', label: 'Scan cards', icon: ScanLine },
@@ -77,6 +78,21 @@ export default function Dashboard() {
   const deletionRunning = useRef(false);
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
   const [clearError, setClearError] = useState('');
+  useEffect(() => {
+    // If the phone browser was killed during OCR, return to Scan Cards with
+    // an actionable message instead of silently resetting to Overview.
+    try {
+      const raw = sessionStorage.getItem(CAMERA_PENDING_KEY);
+      if (!raw) return;
+      sessionStorage.removeItem(CAMERA_PENDING_KEY);
+      const marker: unknown = JSON.parse(raw);
+      if (marker && typeof marker === 'object' && 'started' in marker &&
+          typeof marker.started === 'number' && Date.now() - marker.started < 30 * 60_000) {
+        setSection('scan');
+        setNotice('Your browser restarted before the camera scan finished. Try a smaller photo or use Upload image. No contact was deleted.');
+      }
+    } catch { /* Diagnostic marker is optional. */ }
+  }, []);
 
   const initializeAccount = async (user: Account) => {
     setReady(false); setAuthError(''); setAccount(user); accountIdRef.current = user.id;
@@ -274,6 +290,12 @@ export default function Dashboard() {
           retryFiles.current.delete(id);
           updateJob(id, flagged ? 'review' : 'done');
         } catch (error) { updateJob(id, 'error', error instanceof Error ? error.message : 'Unable to scan this card.'); }
+        finally {
+          try {
+            const raw = sessionStorage.getItem(CAMERA_PENDING_KEY);
+            if (raw && JSON.parse(raw)?.jobId === id) sessionStorage.removeItem(CAMERA_PENDING_KEY);
+          } catch { /* Diagnostic marker is optional. */ }
+        }
         // Yield briefly between local scans to keep the browser responsive.
         if (pending.current.length) await new Promise<void>(resolve => setTimeout(resolve, 250));
       }
@@ -301,6 +323,9 @@ export default function Dashboard() {
     const id = ++nextJobId.current;
     setJobList([...jobsRef.current, { id, name: `${front.name}${back ? ' + back' : ''}`, state: 'preparing' }]);
     pending.current.push({ id, file: front, back });
+    try { sessionStorage.setItem(CAMERA_PENDING_KEY, JSON.stringify({ jobId: id, started: Date.now() })); }
+    catch { /* Scanning remains possible when sessionStorage is disabled. */ }
+    setSection('scan');
     setNotice('Captured card added to the processing queue. Check its status below.');
     void processQueue();
     return true;

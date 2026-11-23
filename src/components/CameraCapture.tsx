@@ -151,7 +151,7 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
     }
     setBusy(true);
     try {
-      const maxEdge = 1800;
+      const maxEdge = 1280;
       const ratio = Math.min(1, maxEdge / Math.max(element.videoWidth, element.videoHeight));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(element.videoWidth * ratio);
@@ -159,8 +159,12 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('Could not prepare the camera photo.');
       ctx.drawImage(element, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+      // Release backing pixels before the local OCR models allocate memory.
+      // The photo itself is kept as an independent Blob/File. 
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.78));
       if (!blob) throw new Error('Could not save the camera photo.');
+      canvas.width = 0;
+      canvas.height = 0;
       const file = new File([blob], `card-${side}-${Date.now()}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
       setCapture(side, file);
     } catch (error) { onError(error instanceof Error ? error.message : 'Could not capture photo.'); }
