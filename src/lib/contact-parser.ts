@@ -26,6 +26,22 @@ function extractPhones(text: string): string[] {
   return distinct(hits);
 }
 const cleaned = (s: string) => s.replace(/^[\s:|•–-]+|[\s|•–-]+$/g, '').replace(/\s{2,}/g, ' ').trim();
+// OCR can wrap names in scan marks such as '~ Name =' or '| Name |'.
+// Remove only edge artifacts, never punctuation within real names.
+const cleanNameCandidate = (s: string) => s.replace(/^[\s~=_*#•|:;]+|[\s~=_*#•|:;]+$/g, '').trim();
+const cleanJobTitle = (s: string) => s.replace(/[\s|:;]+$/g, '').replace(/\s+\d{1,2}$/, '').trim();
+const cleanCompanyName = (s: string) => {
+  const text = s.replace(/[\s|:;]+$/g, '').trim();
+  // Preserve the legal suffix, but remove isolated recognition fragments after it.
+  return text.replace(/(\b(?:pvt\.?\s*ltd\.?|private\s+limited|llp|ltd\.?|inc\.?))\s+[a-z]{1,2}\s*$/i, '$1').trim();
+};
+const hasOddWordPattern = (s: string) => {
+  const words = s.split(/\s+/);
+  return words.length >= 3 && words.filter(w => /^[A-Za-z]{1,2}$/.test(w)).length >= 2;
+};
+// Low-confidence garbage often consists of multiple tiny tokens, despite passing
+// the original name regex. Such lines must not outrank a readable full name.
+const plausibleName = (s: string) => nameLike(s) && !hasOddWordPattern(s);
 const titleCase = (s: string) => /^[A-Z\s.'-]+$/.test(s) ? s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase()) : s;
 const nameLike = (s: string) => /^[\p{L}][\p{L} .'-]{3,65}$/u.test(s) && s.split(/\s+/).length >= 2 && s.split(/\s+/).length <= 5 && !JOB.test(s) && !COMPANY.test(s) && !ADDRESS.test(s) && !NOISE.test(s);
 const singleWord = (s: string) => /^[\p{L}][\p{L}'-]{3,29}$/u.test(s) && !JOB.test(s) && !COMPANY.test(s) && !ADDRESS.test(s) && !NOISE.test(s);
@@ -75,14 +91,17 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   if (knownCompany) occupied.add(knownCompany.index);
   // Prefer legible names adjacent to a designation. OCR frequently includes
   // unrelated small-print text above a real person's name.
-  const names = candidateLines.filter(line => !occupied.has(line.index) && nameLike(line.text));
+  const names = candidateLines
+    .map(line => ({ ...line, text: cleanNameCandidate(line.text) }))
+    .filter(line => !occupied.has(line.index) && plausibleName(line.text));
   const ranked = names.sort((a, b) => {
     const rank = (line: typeof names[number]) =>
-      (job && line.index < job.index && job.index - line.index <= 3 ? 4 : 0) +
+      (job && line.index < job.index && job.index - line.index <= 2 ? 6 : 0) +
       (job && line.index > job.index && line.index - job.index <= 2 ? 1 : 0) +
-      (line.score >= 0.65 ? 2 : 0) -
+      Math.min(3, Math.max(0, line.score) * 3) +
+      (line.text.split(/\s+/).every(w => w.length >= 3) ? 2 : -3) -
       (line.text.length > 42 ? 3 : 0) -
-      (line.index * 0.02);
+      (line.index * 0.05);
     return rank(b) - rank(a);
   });
   const name = ranked[0] ?? findSingleName(candidateLines, job, occupied);
@@ -95,8 +114,12 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   // Keep meaningful taglines, social handles, and unclassified text for review.
   const notes = candidateLines.filter(line => {
     if (occupied.has(line.index) || line.text.length <= 3 || line.score < 0.48) return false;
+    const text = cleanNameCandidate(line.text);
+    // An unassigned candidate next to the job title may be another OCR rendition
+    // of a name. Don't export it as a factual note or tagline.
+    if (job && Math.abs(line.index - job.index) <= 2 && (nameLike(text) || hasOddWordPattern(text))) return false;
     const letters = [...line.text].filter(ch => /[\p{L}\p{N}]/u.test(ch)).length;
-    return letters / line.text.length >= 0.62;
+    return letters / line.text.length >= 0.62 && !hasOddWordPattern(text);
   }).map(line => line.text).join(' | ');
   const scores = usable.map(line => line.score).filter(Number.isFinite);
   const average = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
@@ -104,7 +127,7 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   const confidenceScore = average >= 0.88 && evidence >= 4 && !!name && !!(emails.length || phones.length) ? 'High' : average >= 0.6 && evidence >= 2 ? 'Medium' : 'Low';
   return {
     fullName: name ? titleCase(name.text) : '',
-    jobTitle: job?.text || '', companyName: company?.text || '',
+    jobTitle: job ? cleanJobTitle(job.text) : '', companyName: company ? cleanCompanyName(company.text) : '',
     email: emails.join(', '), phone: phones.join(', '), website: websites[0] || '',
     address: addressLines.map(line => line.text).join(', '), notes,
     confidenceScore,
