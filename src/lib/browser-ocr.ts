@@ -3,6 +3,7 @@
  */
 import { parseContactWithDiagnostics, type OCRLine } from './contact-parser';
 import { rememberOCRDiagnostics } from './ocr-diagnostics';
+import { prepareOCRVariant, shouldTryAlternative, preferAlternative } from './ocr-image-processing';
 import type { BusinessCard } from '@/types/card';
 
 type PaddleEngine = { predict: (image: Blob) => Promise<Array<{ items: Array<{ text: string; score: number; poly?: unknown }> }>> };
@@ -85,13 +86,34 @@ async function mobileLines(front: File, back?: File): Promise<OCRLine[]> {
 
 export async function extractBrowserCard(front: File, back?: File): Promise<BusinessCard> {
   if (typeof window === 'undefined') throw new Error('Free OCR is available only in a browser.');
-  const lines = mobileBrowser() ? await mobileLines(front, back) : await paddleLines(front, back);
+  const recognize = mobileBrowser() ? mobileLines : paddleLines;
+  let lines = await recognize(front, back);
+  let result = parseContactWithDiagnostics(lines);
+  // Do not multiply OCR work for every scan. At most one alternate pass, only
+  // when the first extraction is incomplete and still has useful evidence.
+  // This is a *candidate comparison*, not a guarantee of improved accuracy.
+  if (shouldTryAlternative(result.contact)) {
+    try {
+      const variant = await prepareOCRVariant(front);
+      const alternativeLines = await recognize(variant, back);
+      if (alternativeLines.length) {
+        const alternative = parseContactWithDiagnostics(alternativeLines);
+        if (preferAlternative(result.contact, alternative.contact)) {
+          lines = alternativeLines;
+          result = alternative;
+        }
+      }
+    } catch {
+      // A failed optional pass must never discard a usable initial result.
+    }
+  }
   if (!lines.length) throw new Error('No readable text found. Try a sharper, brighter image.');
-  const { contact: parsed, diagnostics } = parseContactWithDiagnostics(lines);
+  const { contact: parsed, diagnostics } = result;
   if (!parsed.fullName && !parsed.companyName && !parsed.email && !parsed.phone) {
     throw new Error('No recognizable contact fields found. Try a clearer photo or enter details manually.');
   }
   const id = crypto.randomUUID();
+  // Diagnostics are transient and never synced as contact fields.
   rememberOCRDiagnostics(id, diagnostics);
   return { id, ...parsed };
 }

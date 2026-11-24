@@ -30,7 +30,7 @@ test('camera crops before placing captured image into the existing scan queue', 
 test('phone camera native picker also enters crop editor', () => {
   assert.match(camera, /capture="environment"/);
   assert.match(camera, /setPending\(file\)/);
-  assert.match(camera, /const maxEdge = 3000/);
+  assert.match(camera, /const maxEdge = 4096/);
   assert.match(camera, /focusMode\?\.includes\('continuous'\)/);
 });
 
