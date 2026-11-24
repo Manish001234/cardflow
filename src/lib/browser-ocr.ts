@@ -49,10 +49,30 @@ async function mobileLines(front: File, back?: File): Promise<OCRLine[]> {
   try {
     const output: OCRLine[] = [];
     for (const file of [front, back].filter((f): f is File => !!f)) {
-      const { data } = await worker.recognize(file);
-      const score = Math.min(1, Math.max(0, data.confidence / 100));
-      for (const text of data.text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
-        output.push({ text, score });
+      const { data } = await worker.recognize(file, {}, { text: true, blocks: true });
+      // Tesseract v6 exposes individual line boxes when blocks output is enabled.
+      // Preserve per-line confidence and positions; a page-wide average hides a
+      // badly misread name even when email and phone are recognized correctly.
+      type TextLine = { text?: string; confidence?: number; bbox?: { x0: number; y0: number } };
+      type Block = { paragraphs?: Array<{ lines?: TextLine[] }> };
+      const blocks = (data as unknown as { blocks?: Block[] }).blocks ?? [];
+      const textLines = blocks.flatMap(b => (b.paragraphs ?? []).flatMap(p => p.lines ?? []));
+      if (textLines.length) {
+        for (const line of textLines) {
+          if (!line.text?.trim()) continue;
+          output.push({
+            text: line.text.trim(),
+            score: Math.min(1, Math.max(0, (line.confidence ?? data.confidence) / 100)),
+            left: line.bbox?.x0, top: line.bbox?.y0,
+          });
+        }
+      } else {
+        // Older / constrained browsers may omit detailed output. Retain the
+        // original safe fallback without introducing a network OCR call.
+        const score = Math.min(1, Math.max(0, data.confidence / 100));
+        for (const text of data.text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
+          output.push({ text, score });
+        }
       }
     }
     return output;

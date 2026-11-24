@@ -40,7 +40,7 @@ test('front and optional back are retakable, and previews are released', () => {
 test('camera UI includes failure handling, accessible dialog and disabled scan while busy', () => {
   assert.match(component, /role="dialog" aria-modal="true"/);
   assert.match(component, /role="alert"/);
-  assert.match(component, /disabled=\{!front \|\| processing \|\| busy\}/);
+  assert.match(component, /disabled=\{!front \|\| processing \|\| busy \|\| !!pending\}/);
   assert.match(component, /NotAllowedError/);
   assert.match(component, /NotFoundError/);
 });

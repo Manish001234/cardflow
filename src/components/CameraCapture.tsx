@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, CameraOff, Check, ImagePlus, LoaderCircle, RefreshCcw, RotateCcw, SwitchCamera, X } from 'lucide-react';
+import { CardCropEditor } from '@/components/CardCropEditor';
 import { validateImage } from '@/lib/images';
 
 type Side = 'front' | 'back';
@@ -31,6 +32,9 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
   const [front, setFront] = useState<Capture | null>(null);
   const [back, setBack] = useState<Capture | null>(null);
   const [message, setMessage] = useState('');
+  const [pending, setPending] = useState<File | null>(null);
+  const [autoStart, setAutoStart] = useState(false);
+  const [cameraDetails, setCameraDetails] = useState('');
   const video = useRef<HTMLVideoElement>(null);
   const stream = useRef<MediaStream | null>(null);
   const operation = useRef(0);
@@ -58,6 +62,8 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
     stopCamera();
     releaseCaptures();
     setOpen(false);
+    setPending(null);
+    setAutoStart(false);
     setMessage('');
     setSide('front');
   }, [stopCamera, releaseCaptures]);
@@ -94,6 +100,15 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
       }
       if (operation.current !== ticket) { acquired.getTracks().forEach(track => track.stop()); return; }
       stream.current = acquired;
+      const track = acquired.getVideoTracks()[0];
+      if (track) {
+        const capabilities = track.getCapabilities?.() as MediaTrackCapabilities & { focusMode?: string[] };
+        if (capabilities?.focusMode?.includes('continuous')) {
+          try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet] }); } catch { /* unsupported focus control */ }
+        }
+        const settings = track.getSettings();
+        setCameraDetails(`${settings.width ?? '?'} × ${settings.height ?? '?'} camera`);
+      }
       if (video.current) {
         video.current.srcObject = acquired;
         await video.current.play();
@@ -110,14 +125,15 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
 
   const launch = () => {
     setOpen(true);
+    setAutoStart(true);
     setSide('front');
     setMessage('');
     // The video element mounts on the next render; camera is started by the effect below.
   };
 
   useEffect(() => {
-    if (open && !stream.current && !active && !busy && message === '') void startCamera(facing);
-  }, [open, active, busy, message, facing, startCamera]);
+    if (open && !pending && autoStart && !stream.current && !active && !busy && message === '') void startCamera(facing);
+  }, [open, pending, autoStart, active, busy, message, facing, startCamera]);
 
   useEffect(() => {
     if (!open) return;
@@ -151,7 +167,8 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
     }
     setBusy(true);
     try {
-      const maxEdge = 1280;
+      // Preserve small text until the user crops the card; don't downsample the full frame to 1280px.
+      const maxEdge = 3000;
       const ratio = Math.min(1, maxEdge / Math.max(element.videoWidth, element.videoHeight));
       const canvas = document.createElement('canvas');
       canvas.width = Math.round(element.videoWidth * ratio);
@@ -161,14 +178,30 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
       ctx.drawImage(element, 0, 0, canvas.width, canvas.height);
       // Release backing pixels before the local OCR models allocate memory.
       // The photo itself is kept as an independent Blob/File. 
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.78));
+      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
       if (!blob) throw new Error('Could not save the camera photo.');
       canvas.width = 0;
       canvas.height = 0;
       const file = new File([blob], `card-${side}-${Date.now()}.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
-      setCapture(side, file);
+      stopCamera();
+      setAutoStart(false);
+      setPending(file);
     } catch (error) { onError(error instanceof Error ? error.message : 'Could not capture photo.'); }
     finally { setBusy(false); }
+  };
+
+  const cancelCrop = () => {
+    setPending(null);
+    setMessage('');
+    setAutoStart(true);
+  };
+
+  const applyCrop = (file: File) => {
+    setCapture(side, file);
+    setAutoStart(false);
+    setPending(null);
+    // Camera remains stopped while the crop and its review preview are retained.
+    // Restart explicitly if another side must be photographed, saving mobile memory.
   };
 
   const removeSide = (target: Side) => {
@@ -177,6 +210,7 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
     captured.current[target] = null;
     if (target === 'front') setFront(null); else setBack(null);
     setSide(target);
+    setAutoStart(true);
   };
 
   const submit = () => {
@@ -209,19 +243,21 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
       <section role="dialog" aria-modal="true" aria-label="Capture visiting card" className="flex max-h-[95dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <header className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-3 sm:px-6"><div><h2 className="text-base font-bold">Capture visiting card</h2><p className="text-xs text-slate-500">Photograph the front, then optionally the back.</p></div><button type="button" aria-label="Close camera" onClick={close} className="rounded-lg p-2 hover:bg-slate-100"><X className="size-5" /></button></header>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-6">
-          <div className="relative aspect-[4/3] max-h-[45dvh] overflow-hidden rounded-xl bg-slate-950 sm:aspect-video">
+          {pending && <CardCropEditor file={pending} side={side} onApply={applyCrop} onCancel={cancelCrop} onError={setMessage} />}
+          {!pending && <div className="relative aspect-[4/3] max-h-[45dvh] overflow-hidden rounded-xl bg-slate-950 sm:aspect-video">
             <video ref={video} autoPlay muted playsInline className="h-full w-full object-contain" aria-label="Live camera preview" />
             {(!active || busy) && <div className="pointer-events-none absolute inset-0 grid place-items-center text-center text-sm text-white">{busy ? <LoaderCircle className="size-7 animate-spin" /> : <CameraOff className="size-7" />}</div>}
             {active && <div aria-hidden="true" className="pointer-events-none absolute inset-[12%] rounded-lg border-2 border-dashed border-white/70" />}
+            {active && <span className="absolute right-3 top-3 rounded-md bg-slate-950/75 px-2 py-1 text-xs text-white">{cameraDetails}</span>}
             <span className="absolute bottom-3 left-3 rounded-md bg-slate-950/80 px-3 py-1 text-xs font-medium text-white">Capturing {side} side</span>
-          </div>
+          </div>}
           {message && <p role="alert" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">{message}</p>}
           <div className="flex flex-wrap items-center justify-center gap-2">
-            <button type="button" disabled={!active || busy} onClick={() => void takePhoto()} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-40"><Camera className="size-4" /> Capture {side}</button>
-            <button type="button" disabled={busy} onClick={() => { const next = facing === 'environment' ? 'user' : 'environment'; setFacing(next); void startCamera(next); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold disabled:opacity-40"><SwitchCamera className="size-4" /> Switch camera</button>
-            <button type="button" disabled={busy} onClick={() => void startCamera(facing)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold disabled:opacity-40"><RefreshCcw className="size-4" /> Retry camera</button>
-            <input ref={nativeInput} className="sr-only" type="file" accept="image/*" capture="environment" aria-label="Take photo with device camera" onChange={event => { const file = event.target.files?.[0]; if (file) setCapture(side, file); event.target.value = ''; }} />
-            <button type="button" onClick={() => { stopCamera(); setMessage('Take a photo or choose an existing picture. Tap Retry camera to return to the live view.'); nativeInput.current?.click(); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold"><ImagePlus className="size-4" /> Device camera / gallery</button>
+            <button type="button" disabled={!active || busy || !!pending} onClick={() => void takePhoto()} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white disabled:opacity-40"><Camera className="size-4" /> Capture {side}</button>
+            <button type="button" disabled={busy || !!pending} onClick={() => { const next = facing === 'environment' ? 'user' : 'environment'; setFacing(next); setAutoStart(true); void startCamera(next); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold disabled:opacity-40"><SwitchCamera className="size-4" /> Switch camera</button>
+            <button type="button" disabled={busy || !!pending} onClick={() => { setMessage(''); setAutoStart(true); void startCamera(facing); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold disabled:opacity-40"><RefreshCcw className="size-4" /> {active ? 'Restart camera' : 'Start camera'}</button>
+            <input ref={nativeInput} className="sr-only" type="file" accept="image/*" capture="environment" aria-label="Take photo with device camera" onChange={event => { const file = event.target.files?.[0]; if (file) { stopCamera(); setAutoStart(false); setPending(file); } event.target.value = ''; }} />
+            <button type="button" disabled={!!pending} onClick={() => { stopCamera(); setMessage('Take a photo or choose an existing picture. Tap Retry camera to return to the live view.'); nativeInput.current?.click(); }} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold"><ImagePlus className="size-4" /> Device camera / gallery</button>
           </div>
           <div className="grid grid-cols-2 gap-3">{(['front', 'back'] as const).map(target => {
             const capture = target === 'front' ? front : back;
@@ -229,9 +265,9 @@ export function CameraCapture({ processing, onScan, onError }: Props) {
               {capture ? <button type="button" onClick={() => setSide(target)} className="w-full"><img src={capture.url} alt={`${target} card photo`} className="h-24 w-full rounded-lg bg-slate-50 object-contain sm:h-32" /></button> : <button type="button" onClick={() => setSide(target)} className="flex h-24 w-full items-center justify-center rounded-lg border border-dashed border-slate-200 text-xs text-slate-400 sm:h-32">{target === 'front' ? 'Capture front first' : 'Optional back photo'}</button>}
             </div>;
           })}</div>
-          <p className="text-xs text-slate-500">Keep the full card visible with good lighting. You can review extracted fields before exporting or using them.</p>
+          <p className="text-xs text-slate-500">Hold steady and fill the frame with the card. After capturing, crop tightly before OCR. Capture the back only if needed.</p>
         </div>
-        <footer className="flex shrink-0 items-center justify-end gap-3 border-t border-slate-200 px-4 py-3 sm:px-6"><button type="button" onClick={close} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold">Cancel</button><button type="button" onClick={submit} disabled={!front || processing || busy} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-40"><Check className="size-4" /> Scan captured card</button></footer>
+        <footer className="flex shrink-0 items-center justify-end gap-3 border-t border-slate-200 px-4 py-3 sm:px-6"><button type="button" onClick={close} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold">Cancel</button><button type="button" onClick={submit} disabled={!front || processing || busy || !!pending} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white disabled:opacity-40"><Check className="size-4" /> Scan captured card</button></footer>
       </section>
     </div>}
   </>;

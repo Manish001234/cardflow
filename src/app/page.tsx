@@ -5,6 +5,7 @@ import { Uploader } from '@/components/Uploader';
 import { TwoSideUploader } from '@/components/TwoSideUploader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { DuplicateReview, type ReviewItem } from '@/components/DuplicateReview';
+import { ScanVerification, type ScanDraft } from '@/components/ScanVerification';
 import { findDuplicate, mergeCards } from '@/lib/duplicates';
 import { resolveReviewJob } from '@/lib/review-jobs';
 import { getReviewHints } from '@/lib/scan-quality';
@@ -48,6 +49,7 @@ export default function Dashboard() {
   const [cards, setCards] = useState<StoredCard[]>([]);
   const cardsRef = useRef<StoredCard[]>([]);
   const [reviews, setReviews] = useState<ReviewItem[]>([]);
+  const [scanDrafts, setScanDrafts] = useState<ScanDraft[]>([]);
   const [ready, setReady] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [account, setAccount] = useState<Account | null>(null);
@@ -242,7 +244,7 @@ export default function Dashboard() {
     const response = await fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     if (!response.ok) { setNotice('Sign out failed. Please retry.'); return; }
     setReady(false); setAccount(null); accountIdRef.current = null;
-    originalFiles.current.clear(); cardsRef.current = []; syncedRef.current = []; setCards([]); setReviews([]); setExports([]); setSection('overview');
+    originalFiles.current.clear(); cardsRef.current = []; syncedRef.current = []; setCards([]); setReviews([]); setScanDrafts([]); setExports([]); setSection('overview');
   };
   const commitCards = (update: (previous: StoredCard[]) => StoredCard[]) => {
     if (deletionRunning.current) { setNotice('A deletion is in progress. Wait for MongoDB confirmation.'); return; }
@@ -277,18 +279,12 @@ export default function Dashboard() {
           const card = await extractBrowserCard(prepared.upload, preparedBack?.upload);
           const createdAt = new Date().toISOString();
           const extracted: StoredCard[] = [{ ...card, preview: prepared.preview, backPreview: preparedBack?.preview, createdAt, sourceName: file.name }];
-          let flagged = false;
-          for (const candidate of extracted) {
-            const match = findDuplicate(candidate, cardsRef.current);
-            if (match) { originalFiles.current.set(candidate.id, { front: file, back }); reviewJobIds.current.set(candidate.id, id); setReviews(current => [...current, { candidate, match }]); flagged = true; }
-            else {
-              if (!accountIdRef.current) throw new Error('Please sign in before uploading images.');
-              const images = await uploadOriginals(accountIdRef.current, candidate.id, file, back);
-              commitCards(previous => [{ ...candidate, images }, ...previous]);
-            }
-          }
-          retryFiles.current.delete(id);
-          updateJob(id, flagged ? 'review' : 'done');
+          // Never auto-save an unverified OCR interpretation. Keep each scan in
+          // the review queue until the user explicitly approves the fields.
+          setScanDrafts(previous => [...previous, { jobId: id, candidate: extracted[0], front: file, back }]);
+          setSection('scan');
+          setNotice('Extraction completed. Check the captured card and correct fields before saving.');
+          updateJob(id, 'review');
         } catch (error) { updateJob(id, 'error', error instanceof Error ? error.message : 'Unable to scan this card.'); }
         finally {
           try {
@@ -329,6 +325,38 @@ export default function Dashboard() {
     setNotice('Captured card added to the processing queue. Check its status below.');
     void processQueue();
     return true;
+  };
+  const confirmScan = async (edited: StoredCard): Promise<void> => {
+    if (uploadBusy || recoverable) throw new Error('Complete the current save or pending sync before reviewing another scan.');
+    const draft = scanDrafts.find(item => item.candidate.id === edited.id);
+    if (!draft) throw new Error('The scan is no longer available. Please scan again.');
+    if (!accountIdRef.current) throw new Error('Please sign in before saving.');
+    setUploadBusy(true);
+    try {
+      // This scan was explicitly checked against the captured image.
+      edited = { ...edited, reviewedAt: new Date().toISOString() };
+      const match = findDuplicate(edited, cardsRef.current);
+      if (match) {
+        originalFiles.current.set(edited.id, { front: draft.front, back: draft.back });
+        reviewJobIds.current.set(edited.id, draft.jobId);
+        setReviews(previous => [...previous, { candidate: edited, match }]);
+        setNotice('Review the possible duplicate before saving or merging this contact.');
+      } else {
+        const images = await uploadOriginals(accountIdRef.current, edited.id, draft.front, draft.back);
+        commitCards(previous => [{ ...edited, images }, ...previous]);
+        updateJob(draft.jobId, 'done');
+        setNotice('Contact accepted. Wait for Cloud saved before refreshing.');
+      }
+      retryFiles.current.delete(draft.jobId);
+      setScanDrafts(previous => previous.filter(item => item.candidate.id !== edited.id));
+    } finally { setUploadBusy(false); }
+  };
+  const discardScan = (draft: ScanDraft) => {
+    if (uploadBusy) return;
+    setScanDrafts(previous => previous.filter(item => item.candidate.id !== draft.candidate.id));
+    retryFiles.current.delete(draft.jobId);
+    setJobList(jobsRef.current.filter(job => job.id !== draft.jobId));
+    setNotice('Scan discarded. Your saved contacts are unchanged.');
   };
   const onDecide = async (candidateId: string, action: 'keep'|'replace'|'merge'|'skip') => {
     if (recoverable || uploadBusy) { setNotice('Complete pending synchronization or image upload before reviewing duplicates.'); return; }
@@ -543,7 +571,7 @@ export default function Dashboard() {
           <section className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4 sm:p-5" aria-label="Free OCR information">
             <div className="flex items-start gap-3"><ScanLine className="mt-0.5 size-5 shrink-0 text-blue-700" /><div><h2 className="text-sm font-bold text-slate-900">Free OCR · Runs in your browser</h2><p className="mt-1 text-xs leading-5 text-slate-600">No Gemini, OpenAI, or paid OCR credits. The model downloads on first use; scanning uses your device. Check extracted details before saving—names and companies may need corrections.</p></div></div>
           </section>
-          <CameraCapture processing={processingCount > 0} onScan={onPair} onError={setNotice} /><Uploader processing={processingCount > 0} onFiles={onFiles} onError={setNotice} /><TwoSideUploader processing={processingCount > 0} onScan={onPair} onError={setNotice} />{progressPanel}<DuplicateReview pending={reviews} cards={cards} onDecide={(id, action) => { void onDecide(id, action); }} /><div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><h3 className="font-bold">Ready to review?</h3><p className="mt-1 text-xs text-slate-500">{cards.length} contact{cards.length === 1 ? '' : 's'} currently saved in your directory.</p></div><button onClick={() => open('contacts')} className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold hover:bg-slate-50">View contacts <ArrowRight className="size-4" /></button></div></>}
+          <CameraCapture processing={processingCount > 0} onScan={onPair} onError={setNotice} /><Uploader processing={processingCount > 0} onFiles={onFiles} onError={setNotice} /><TwoSideUploader processing={processingCount > 0} onScan={onPair} onError={setNotice} />{progressPanel}{scanDrafts.map(draft => <ScanVerification key={draft.candidate.id} draft={draft} busy={uploadBusy} onSave={confirmScan} onDiscard={() => discardScan(draft)} />)}<DuplicateReview pending={reviews} cards={cards} onDecide={(id, action) => { void onDecide(id, action); }} /><div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><h3 className="font-bold">Ready to review?</h3><p className="mt-1 text-xs text-slate-500">{cards.length} contact{cards.length === 1 ? '' : 's'} currently saved in your directory.</p></div><button onClick={() => open('contacts')} className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold hover:bg-slate-50">View contacts <ArrowRight className="size-4" /></button></div></>}
         {section === 'contacts' && <><div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4"><div className="relative min-w-[220px] flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name, company, email, phone…" aria-label="Search contacts" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm outline-none focus:border-blue-400 focus:bg-white" /></div><input ref={importRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" aria-label="Import contacts file" onChange={event => void onImport(event.target.files?.[0])} />
         <button type="button" disabled={importing} onClick={() => importRef.current?.click()} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"><FileUp className="size-4" /> {importing ? 'Importing…' : 'Import CSV / Excel'}</button>
         <span className="rounded-full bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700">{cards.length} contacts</span>{reviews.length>0 && <button onClick={() => open('scan')} className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">{reviews.length} duplicate{reviews.length!==1?'s':''} to review</button>}<button disabled={!cards.length || deleting} onClick={() => { setClearError(''); setClearDialogOpen(true); }} className="inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-30"><Trash2 className="size-4" /> Clear all</button></div><div className="flex flex-wrap gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">

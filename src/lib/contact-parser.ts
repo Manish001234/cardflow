@@ -73,18 +73,35 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   if (job) occupied.add(job.index);
   const knownCompany = candidateLines.find(line => !occupied.has(line.index) && COMPANY.test(line.text) && line.text.length <= 100);
   if (knownCompany) occupied.add(knownCompany.index);
-  const name = candidateLines.find(line => !occupied.has(line.index) && nameLike(line.text))
-    ?? findSingleName(candidateLines, job, occupied);
+  // Prefer legible names adjacent to a designation. OCR frequently includes
+  // unrelated small-print text above a real person's name.
+  const names = candidateLines.filter(line => !occupied.has(line.index) && nameLike(line.text));
+  const ranked = names.sort((a, b) => {
+    const rank = (line: typeof names[number]) =>
+      (job && line.index < job.index && job.index - line.index <= 3 ? 4 : 0) +
+      (job && line.index > job.index && line.index - job.index <= 2 ? 1 : 0) +
+      (line.score >= 0.65 ? 2 : 0) -
+      (line.text.length > 42 ? 3 : 0) -
+      (line.index * 0.02);
+    return rank(b) - rank(a);
+  });
+  const name = ranked[0] ?? findSingleName(candidateLines, job, occupied);
   if (name) occupied.add(name.index);
   const company = knownCompany ?? findBrand(candidateLines, job, name, occupied);
   if (company) occupied.add(company.index);
   const addressLines = candidateLines.filter(line => !occupied.has(line.index) && (ADDRESS.test(line.text) || /\b\d{5,6}\b/.test(line.text)));
   addressLines.forEach(line => occupied.add(line.index));
-  const notes = candidateLines.filter(line => !occupied.has(line.index) && line.text.length > 2).map(line => line.text).join(' | ');
+  // Do not export obvious recognition garbage as factual contact notes.
+  // Keep meaningful taglines, social handles, and unclassified text for review.
+  const notes = candidateLines.filter(line => {
+    if (occupied.has(line.index) || line.text.length <= 3 || line.score < 0.48) return false;
+    const letters = [...line.text].filter(ch => /[\p{L}\p{N}]/u.test(ch)).length;
+    return letters / line.text.length >= 0.62;
+  }).map(line => line.text).join(' | ');
   const scores = usable.map(line => line.score).filter(Number.isFinite);
   const average = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
   const evidence = [name, company, job].filter(Boolean).length + Number(emails.length > 0) + Number(phones.length > 0);
-  const confidenceScore = average >= 0.88 && evidence >= 3 ? 'High' : average >= 0.6 && evidence >= 2 ? 'Medium' : 'Low';
+  const confidenceScore = average >= 0.88 && evidence >= 4 && !!name && !!(emails.length || phones.length) ? 'High' : average >= 0.6 && evidence >= 2 ? 'Medium' : 'Low';
   return {
     fullName: name ? titleCase(name.text) : '',
     jobTitle: job?.text || '', companyName: company?.text || '',

@@ -23,9 +23,9 @@ test('mobile OCR uses shared contact parser and handles front/back together', ()
   assert.doesNotMatch(ocr, /fetch\(|\/api\/extract-card/);
 });
 
-test('camera captures compressed smaller photos and stops stream before handoff', () => {
-  assert.match(camera, /maxEdge = 1280/);
-  assert.match(camera, /canvas\.toBlob\(resolve, 'image\/jpeg', 0\.78\)/);
+test('camera keeps larger photos until cropping and stops stream before handoff', () => {
+  assert.match(camera, /maxEdge = 3000/);
+  assert.match(camera, /canvas\.toBlob\(resolve, 'image\/jpeg', 0\.9\)/);
   const submit = camera.slice(camera.indexOf('  const submit = () => {'),camera.indexOf('  return <>'));
   assert.ok(submit.indexOf('stopCamera()') < submit.indexOf('onScan(frontFile, backFile)'));
 });
