@@ -21,6 +21,7 @@ import { missingCloudContactIds } from '@/lib/contact-integrity';
 import { uploadOriginals } from '@/lib/cloud-images';
 import type { EditableField, StoredCard } from '@/types/card';
 import { extractBrowserCard } from '@/lib/browser-ocr';
+import { extractGeminiCard, type ScanProvider } from '@/lib/gemini-client';
 
 type Section = 'overview' | 'scan' | 'contacts' | 'exports';
 type JobState = 'preparing' | 'extracting' | 'done' | 'error';
@@ -45,6 +46,7 @@ const prettyTime = (value: string) => { const d = new Date(value); return Number
 
 export default function Dashboard() {
   const [section, setSection] = useState<Section>('overview');
+  const [scanProvider, setScanProvider] = useState<ScanProvider>('free');
   const [mobileNav, setMobileNav] = useState(false);
   const [cards, setCards] = useState<StoredCard[]>([]);
   const cardsRef = useRef<StoredCard[]>([]);
@@ -69,8 +71,8 @@ export default function Dashboard() {
   const [exporting, setExporting] = useState(false);
   const [exports, setExports] = useState<ExportLog[]>([]);
   const running = useRef(false);
-  const pending = useRef<Array<{ id: number; file: File; back?: File }>>([]);
-  const retryFiles = useRef(new Map<number, { file: File; back?: File }>());
+  const pending = useRef<Array<{ id: number; file: File; back?: File; provider: ScanProvider }>>([]);
+  const retryFiles = useRef(new Map<number, { file: File; back?: File; provider: ScanProvider }>());
   const nextJobId = useRef(0);
   const jobsRef = useRef<Job[]>([]);
   const reviewJobIds = useRef(new Map<string, number>());
@@ -268,15 +270,17 @@ export default function Dashboard() {
     running.current = true;
     try {
       while (pending.current.length) {
-        const { id, file, back } = pending.current.shift()!;
-        retryFiles.current.set(id, { file, back });
+        const { id, file, back, provider } = pending.current.shift()!;
+        retryFiles.current.set(id, { file, back, provider });
         updateJob(id, 'preparing');
         try {
           const prepared = await prepareImage(file);
           const preparedBack = back ? await prepareImage(back) : undefined;
           updateJob(id, 'extracting');
-          // OCR runs in the browser; only original images are uploaded to private Blob after review.
-          const card = await extractBrowserCard(prepared.upload, preparedBack?.upload);
+          // Free OCR stays on-device; paid Gemini is called only after explicit selection.
+          const card = provider === 'gemini'
+            ? await extractGeminiCard(prepared.upload, preparedBack?.upload)
+            : await extractBrowserCard(prepared.upload, preparedBack?.upload);
           const createdAt = new Date().toISOString();
           const extracted: StoredCard[] = [{ ...card, preview: prepared.preview, backPreview: preparedBack?.preview, createdAt, sourceName: file.name }];
           // Never auto-save an unverified OCR interpretation. Keep each scan in
@@ -310,15 +314,15 @@ export default function Dashboard() {
     if (recoverable) { setNotice('Resolve unsynced browser recovery before scanning new cards.'); return; }
     const newJobs = files.map(file => ({ id: ++nextJobId.current, name: file.name, state: 'preparing' as const, file }));
     setJobList([...jobsRef.current, ...newJobs.map(({ id, name, state }) => ({ id, name, state }))]);
-    pending.current.push(...newJobs.map(({ id, file }) => ({ id, file })));
+    pending.current.push(...newJobs.map(({ id, file }) => ({ id, file, provider: scanProvider }))); 
     void processQueue();
-  }, [processQueue, recoverable]);
+  }, [processQueue, recoverable, scanProvider]);
   const onPair = (front: File, back?: File): boolean => {
     if (recoverable) { setNotice('Resolve unsynced browser recovery before scanning new cards.'); return false; }
     if (!accountIdRef.current) { setNotice('Please sign in before scanning a card.'); return false; }
     const id = ++nextJobId.current;
     setJobList([...jobsRef.current, { id, name: `${front.name}${back ? ' + back' : ''}`, state: 'preparing' }]);
-    pending.current.push({ id, file: front, back });
+    pending.current.push({ id, file: front, back, provider: scanProvider });
     try { sessionStorage.setItem(CAMERA_PENDING_KEY, JSON.stringify({ jobId: id, started: Date.now() })); }
     catch { /* Scanning remains possible when sessionStorage is disabled. */ }
     setSection('scan');
@@ -568,8 +572,21 @@ export default function Dashboard() {
             <div className="space-y-6"><section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex items-center gap-3"><span className="rounded-xl bg-blue-50 p-2.5 text-blue-600"><Activity className="size-5" /></span><div><h2 className="font-bold">Quick actions</h2><p className="text-xs text-slate-500">The essentials, one click away</p></div></div><div className="mt-5 space-y-2">{[{ label: 'Scan new cards', description: 'Upload images with free OCR', icon: ScanLine, target: 'scan' as const }, { label: 'Browse contacts', description: 'Search and edit your records', icon: ContactRound, target: 'contacts' as const }, { label: 'Export your data', description: 'Download CSV or Excel', icon: Download, target: 'exports' as const }].map(action => <button key={action.target} onClick={() => open(action.target)} className="flex w-full items-center gap-3 rounded-xl border border-slate-100 p-3 text-left hover:border-blue-100 hover:bg-blue-50/40"><action.icon className="size-5 shrink-0 text-blue-600" /><span className="flex-1"><span className="block text-sm font-semibold">{action.label}</span><span className="mt-0.5 block text-xs text-slate-500">{action.description}</span></span><ChevronRight className="size-4 text-slate-300" /></button>)}</div></section><section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><h2 className="font-bold">Your workflow</h2><div className="mt-5 space-y-5">{[{ n: '01', label: 'Upload', sub: 'Add a photo or a batch of cards' }, { n: '02', label: 'Review', sub: 'Check and correct extracted fields' }, { n: '03', label: 'Export', sub: 'Take contacts to CSV or Excel' }].map(step => <div key={step.n} className="flex items-start gap-3"><span className="rounded-lg bg-slate-100 px-2.5 py-2 text-xs font-extrabold text-slate-500">{step.n}</span><div><p className="text-sm font-semibold">{step.label}</p><p className="mt-0.5 text-xs text-slate-500">{step.sub}</p></div></div>)}</div></section></div></div>
         </>}
         {section === 'scan' && <>
-          <section className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4 sm:p-5" aria-label="Free OCR information">
-            <div className="flex items-start gap-3"><ScanLine className="mt-0.5 size-5 shrink-0 text-blue-700" /><div><h2 className="text-sm font-bold text-slate-900">Free OCR · Runs in your browser</h2><p className="mt-1 text-xs leading-5 text-slate-600">No Gemini, OpenAI, or paid OCR credits. The model downloads on first use; scanning uses your device. Check extracted details before saving—names and companies may need corrections.</p></div></div>
+          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5" aria-label="OCR provider selection">
+            <h2 className="text-sm font-bold text-slate-900">Extraction method</h2>
+            <p className="mt-1 text-xs text-slate-500">Free OCR is always the default. Choose Gemini only when you want to use paid API credits. Your selection applies to new scans.</p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Choose OCR provider">
+              <label className={`cursor-pointer rounded-xl border p-3 ${scanProvider === 'free' ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white'}`}>
+                <input type="radio" name="scanProvider" value="free" checked={scanProvider === 'free'} onChange={() => setScanProvider('free')} className="mr-2 accent-blue-600" />
+                <span className="text-sm font-bold">Free OCR · Default</span>
+                <p className="mt-1 pl-5 text-xs text-slate-500">Runs locally in your browser, no AI API charges.</p>
+              </label>
+              <label className={`cursor-pointer rounded-xl border p-3 ${scanProvider === 'gemini' ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white'}`}>
+                <input type="radio" name="scanProvider" value="gemini" checked={scanProvider === 'gemini'} onChange={() => setScanProvider('gemini')} className="mr-2 accent-blue-600" />
+                <span className="text-sm font-bold">Gemini AI · Optional</span>
+                <p className="mt-1 pl-5 text-xs text-slate-500">Sends cropped card images to Google for extraction. Uses your API allowance and billing.</p>
+              </label>
+            </div>
           </section>
           <CameraCapture processing={processingCount > 0} onScan={onPair} onError={setNotice} /><Uploader processing={processingCount > 0} onFiles={onFiles} onError={setNotice} /><TwoSideUploader processing={processingCount > 0} onScan={onPair} onError={setNotice} />{progressPanel}{scanDrafts.map(draft => <ScanVerification key={draft.candidate.id} draft={draft} busy={uploadBusy} onSave={confirmScan} onDiscard={() => discardScan(draft)} />)}<DuplicateReview pending={reviews} cards={cards} onDecide={(id, action) => { void onDecide(id, action); }} /><div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div><h3 className="font-bold">Ready to review?</h3><p className="mt-1 text-xs text-slate-500">{cards.length} contact{cards.length === 1 ? '' : 's'} currently saved in your directory.</p></div><button onClick={() => open('contacts')} className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold hover:bg-slate-50">View contacts <ArrowRight className="size-4" /></button></div></>}
         {section === 'contacts' && <><div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4"><div className="relative min-w-[220px] flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name, company, email, phone…" aria-label="Search contacts" className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 text-sm outline-none focus:border-blue-400 focus:bg-white" /></div><input ref={importRef} type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" aria-label="Import contacts file" onChange={event => void onImport(event.target.files?.[0])} />
