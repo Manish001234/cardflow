@@ -58,7 +58,7 @@ export function ScanVerification({ draft, busy, onSave, onDiscard }: {
         {candidate.backPreview && <><p className="mt-3 text-xs text-slate-500">Back of card</p>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={candidate.backPreview} alt="Back of visiting card" className="mt-1 max-h-52 w-full object-contain" /></>}
-        <p className="mt-3 text-xs text-slate-500">OCR confidence: {candidate.confidenceScore}. This is only an estimated clarity indicator, not an accuracy guarantee.</p>
+        <p className="mt-3 text-xs text-slate-500">OCR confidence: {candidate.confidenceScore}. This estimates recognition confidence and field completeness, not camera sharpness or guaranteed accuracy.</p>
       </div>
       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
         {editableFields.map(field => <label key={field} className={`block min-w-0 ${field === 'address' || field === 'notes' ? 'sm:col-span-2' : ''}`}>

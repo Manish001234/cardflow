@@ -8,7 +8,10 @@ const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const WEB = /(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|org|net|co|in|io|ai|edu|gov|biz|dev|info)(?:\/[\w/?#=&%+.-]*)?/gi;
 const JOB = /\b(?:founder|co-founder|director|manager|engineer|designer|developer|consultant|analyst|president|vice president|ceo|cto|cfo|coo|head|lead|sales|marketing|executive|officer|architect|specialist|proprietor|partner|accountant|recruiter|administrator|coordinator|doctor|professor|attorney|advocate|supervisor|representative|business development|operations|hr|human resources|general manager)\b/i;
 const COMPANY = /\b(?:pvt\.?\s*ltd\.?|private limited|limited|ltd\.?|llp|inc\.?|corp(?:oration)?|technologies|technology|solutions|systems|services|industries|enterprises|group|consulting|studio|labs|agency|company|software|traders|associates)\b/i;
-const ADDRESS = /\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|block|floor|building|tower|suite|office|sector|plot|near|opposite|industrial area|nagar|colony|district|city|state|pin(?:code)?|zip)\b/i;
+const ADDRESS = /\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|block|floor|building|tower|suite|office|sector|plot|near|opposite|industrial area|nagar|colony|district|city|state|pin(?:code)?|zip|mandir|marg|layout|phase)\b/i;
+const OFFICE_LABEL = /^(?:head|corporate|registered|branch|regional|site|main)\s+office\b/i;
+const POSTAL = /\b\d{5,6}\b/;
+const MEANINGFUL_TITLE_SUFFIX = /^(?:qa|qc|hr|it|ai|ii|iii|iv|v|r&d|operations|sales|marketing|finance|technical|engineering|product|business|executive|general|regional|senior|junior|assistant|associate|managing|deputy|digital|growth|strategy)$/i;
 const NOISE = /^(?:tel|mobile|mob|phone|email|e-mail|website|web|www|address|contact|fax|direct|office|whatsapp|scan|qr|follow us)\b/i;
 const LABEL = /^(?:mobile|mob|telephone|tel|phone|cell|contact|whatsapp|ph)\s*[:.\-]?\s*/i;
 const PHONE_CANDIDATE = /(?:\+?\d[\d\s().\-]{7,}\d)/g;
@@ -18,22 +21,42 @@ function distinct(values: string[]): string[] {
 function extractPhones(text: string): string[] {
   const hits: string[] = [];
   for (const match of text.matchAll(PHONE_CANDIDATE)) {
-    const candidate = match[0].trim(); const digits = candidate.replace(/\D/g, '');
+    let candidate = match[0].trim();
+    // OCR may append an unmatched "(2" or a lone digit after a complete number.
+    // Only remove it when a full-length phone number precedes the fragment.
+    const noisyTail = candidate.match(/^(.*?)(?:\s+\(\s*\d{1,2}|\s+\d)$/);
+    if (noisyTail && noisyTail[1].replace(/\D/g, '').length >= 10) candidate = noisyTail[1].trim();
+    candidate = candidate.replace(/[\s(.,;:|-]+$/, '').trim();
+    if ((candidate.match(/\(/g) ?? []).length > (candidate.match(/\)/g) ?? []).length) {
+      candidate = candidate.replace(/\([^)]*$/, '').trim();
+    }
+    const digits = candidate.replace(/\D/g, '');
     if (digits.length < 10 || digits.length > 15 || /^\d{4}[- /.]?\d{2}[- /.]?\d{2}$/.test(candidate)) continue;
-    // Exclude obvious telephone-looking fragments of URLs or email identifiers.
     hits.push(candidate.replace(/\s+/g, ' '));
   }
   return distinct(hits);
 }
+
 const cleaned = (s: string) => s.replace(/^[\s:|•–-]+|[\s|•–-]+$/g, '').replace(/\s{2,}/g, ' ').trim();
 // OCR can wrap names in scan marks such as '~ Name =' or '| Name |'.
 // Remove only edge artifacts, never punctuation within real names.
 const cleanNameCandidate = (s: string) => s.replace(/^[\s~=_*#•|:;]+|[\s~=_*#•|:;]+$/g, '').trim();
-const cleanJobTitle = (s: string) => s.replace(/[\s|:;]+$/g, '').replace(/\s+\d{1,2}$/, '').trim();
+// Remove stray OCR glyphs but keep legitimate title qualifiers (QA, HR, II, etc.).
+const cleanJobTitle = (s: string) => {
+  let title = s.replace(/[\s|:;*~=]+$/g, '').replace(/\s+\d{1,2}$/, '').trim();
+  const match = title.match(/^(.*?)(?:\s+([A-Za-z]{1,2}))$/);
+  if (match && JOB.test(match[1]) && !MEANINGFUL_TITLE_SUFFIX.test(match[2])) {
+    // Only discard obviously duplicated, non-word OCR glyphs ("QQ", "ZZ").
+    if (/^([A-Za-z])\1$/i.test(match[2])) title = match[1];
+  }
+  return title;
+};
 const cleanCompanyName = (s: string) => {
-  const text = s.replace(/[\s|:;]+$/g, '').trim();
-  // Preserve the legal suffix, but remove isolated recognition fragments after it.
-  return text.replace(/(\b(?:pvt\.?\s*ltd\.?|private\s+limited|llp|ltd\.?|inc\.?))\s+[a-z]{1,2}\s*$/i, '$1').trim();
+  const text = s.replace(/[\s|:;*~=]+$/g, '').trim();
+  // Terminal repeated/isolated fragments immediately following a recognized
+  // company legal suffix are OCR artifacts. Preserve meaningful suffixes.
+  return text.replace(/(\b(?:pvt\.?\s*ltd\.?|private\s+limited|llp|ltd\.?|inc\.?))\s+([a-z]{1,2})(?:\s*[*:;|~]*)$/i, (whole, suffix: string, fragment: string) =>
+    MEANINGFUL_TITLE_SUFFIX.test(fragment) ? whole : suffix).trim();
 };
 const hasOddWordPattern = (s: string) => {
   const words = s.split(/\s+/);
@@ -108,8 +131,21 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   if (name) occupied.add(name.index);
   const company = knownCompany ?? findBrand(candidateLines, job, name, occupied);
   if (company) occupied.add(company.index);
-  const addressLines = candidateLines.filter(line => !occupied.has(line.index) && (ADDRESS.test(line.text) || /\b\d{5,6}\b/.test(line.text)));
-  addressLines.forEach(line => occupied.add(line.index));
+  // Recognize both office headings, and keep address continuation lines that
+  // OCR may emit separately from their heading. Do not consume names/contacts.
+  const addressLines: typeof candidateLines = [];
+  let previousAddress: typeof candidateLines[number] | undefined;
+  for (const line of candidateLines) {
+    if (occupied.has(line.index)) { previousAddress = undefined; continue; }
+    const explicit = OFFICE_LABEL.test(line.text) || ADDRESS.test(line.text) || POSTAL.test(line.text);
+    const continuation = !!previousAddress && line.index - previousAddress.index <= 2 &&
+      /(?:^\s*\d+[\w/-]*\s*,|,|\b(?:Bhopal|M\.?P\.?|India)\b)/i.test(line.text) &&
+      !JOB.test(line.text) && !COMPANY.test(line.text) &&
+      !extractPhones(line.text).length;
+    if (explicit || continuation) {
+      addressLines.push(line); occupied.add(line.index); previousAddress = line;
+    } else previousAddress = undefined;
+  }
   // Do not export obvious recognition garbage as factual contact notes.
   // Keep meaningful taglines, social handles, and unclassified text for review.
   const notes = candidateLines.filter(line => {
@@ -129,7 +165,7 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
     fullName: name ? titleCase(name.text) : '',
     jobTitle: job ? cleanJobTitle(job.text) : '', companyName: company ? cleanCompanyName(company.text) : '',
     email: emails.join(', '), phone: phones.join(', '), website: websites[0] || '',
-    address: addressLines.map(line => line.text).join(', '), notes,
+    address: distinct(addressLines.map(line => line.text.replace(/^[\s|•~]+/, '').replace(/[\s|•~=]+$/, '').trim())).join('\n'), notes,
     confidenceScore,
   };
 }
