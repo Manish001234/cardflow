@@ -40,7 +40,7 @@ function extractPhones(text: string): string[] {
 const cleaned = (s: string) => s.replace(/^[\s:|•–-]+|[\s|•–-]+$/g, '').replace(/\s{2,}/g, ' ').trim();
 // OCR can wrap names in scan marks such as '~ Name =' or '| Name |'.
 // Remove only edge artifacts, never punctuation within real names.
-const cleanNameCandidate = (s: string) => s.replace(/^[\s~=_*#•|:;]+|[\s~=_*#•|:;]+$/g, '').trim();
+const cleanNameCandidate = (s: string) => s.replace(/^[\s~=_*#•|:;<>\[\]{}]+|[\s~=_*#•|:;<>\[\]{}]+$/g, '').trim();
 // Remove stray OCR glyphs but keep legitimate title qualifiers (QA, HR, II, etc.).
 const cleanJobTitle = (s: string) => {
   let title = s.replace(/[\s|:;*~=]+$/g, '').replace(/\s+\d{1,2}$/, '').trim();
@@ -92,7 +92,21 @@ function findBrand<T extends { text: string; index: number }>(
     (line.index < name.index && name.index - line.index <= 2)
   ));
 }
-export function parseContact(lines: OCRLine[]): ParsedContact {
+export interface NameCandidateDiagnostic {
+  original: string;
+  normalized: string;
+  ocrConfidence: number;
+  rank: number | null;
+  decision: 'selected' | 'candidate' | 'rejected';
+  reason: string;
+}
+export interface ContactParseDiagnostics {
+  nameCandidates: NameCandidateDiagnostic[];
+  rawLines: Array<{ text: string; confidence: number; top?: number; left?: number }>;
+  selectedName: string;
+}
+// Diagnostics remain in browser memory only; never add them to a MongoDB record.
+export function parseContactWithDiagnostics(lines: OCRLine[]): { contact: ParsedContact; diagnostics: ContactParseDiagnostics } {
   const usable = lines.map((line, index) => ({ ...line, text: cleaned(line.text), index }))
     .filter(line => line.text && line.score >= 0.15);
   const originalText = usable.map(line => line.text).join('\n');
@@ -114,19 +128,21 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   if (knownCompany) occupied.add(knownCompany.index);
   // Prefer legible names adjacent to a designation. OCR frequently includes
   // unrelated small-print text above a real person's name.
-  const names = candidateLines
-    .map(line => ({ ...line, text: cleanNameCandidate(line.text) }))
-    .filter(line => !occupied.has(line.index) && plausibleName(line.text));
-  const ranked = names.sort((a, b) => {
-    const rank = (line: typeof names[number]) =>
-      (job && line.index < job.index && job.index - line.index <= 2 ? 6 : 0) +
-      (job && line.index > job.index && line.index - job.index <= 2 ? 1 : 0) +
+  const nameEvidence = candidateLines
+    .filter(line => !occupied.has(line.index))
+    .map(line => ({ ...line, original: line.text, text: cleanNameCandidate(line.text) }));
+  const rankName = (line: typeof nameEvidence[number]): number => {
+    const distance = job ? Math.abs(line.index - job.index) : Infinity;
+    const adjacentTitle = job && line.index < job.index && distance <= 2 ? 7 : 0;
+    const afterTitle = job && line.index > job.index && distance <= 2 ? 1 : 0;
+    const words = line.text.split(/\s+/);
+    const solidWords = words.every(word => word.replace(/['.-]/g, '').length >= 3);
+    return adjacentTitle + afterTitle +
       Math.min(3, Math.max(0, line.score) * 3) +
-      (line.text.split(/\s+/).every(w => w.length >= 3) ? 2 : -3) -
-      (line.text.length > 42 ? 3 : 0) -
-      (line.index * 0.05);
-    return rank(b) - rank(a);
-  });
+      (solidWords ? 3 : -3) - (line.text.length > 42 ? 3 : 0) - line.index * 0.05;
+  };
+  const ranked = nameEvidence.filter(line => plausibleName(line.text))
+    .sort((a, b) => rankName(b) - rankName(a));
   const name = ranked[0] ?? findSingleName(candidateLines, job, occupied);
   if (name) occupied.add(name.index);
   const company = knownCompany ?? findBrand(candidateLines, job, name, occupied);
@@ -153,7 +169,7 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
     const text = cleanNameCandidate(line.text);
     // An unassigned candidate next to the job title may be another OCR rendition
     // of a name. Don't export it as a factual note or tagline.
-    if (job && Math.abs(line.index - job.index) <= 2 && (nameLike(text) || hasOddWordPattern(text))) return false;
+    if (job && Math.abs(line.index - job.index) <= 3 && (plausibleName(text) || hasOddWordPattern(text))) return false;
     const letters = [...line.text].filter(ch => /[\p{L}\p{N}]/u.test(ch)).length;
     return letters / line.text.length >= 0.62 && !hasOddWordPattern(text);
   }).map(line => line.text).join(' | ');
@@ -161,11 +177,34 @@ export function parseContact(lines: OCRLine[]): ParsedContact {
   const average = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
   const evidence = [name, company, job].filter(Boolean).length + Number(emails.length > 0) + Number(phones.length > 0);
   const confidenceScore = average >= 0.88 && evidence >= 4 && !!name && !!(emails.length || phones.length) ? 'High' : average >= 0.6 && evidence >= 2 ? 'Medium' : 'Low';
-  return {
+  const diagnostics: ContactParseDiagnostics = {
+    selectedName: name?.text ?? '',
+    rawLines: usable.map(line => ({ text: line.text, confidence: line.score, top: line.top, left: line.left })),
+    nameCandidates: nameEvidence.map(line => {
+      const valid = plausibleName(line.text);
+      const selected = name?.index === line.index;
+      return {
+        original: line.original,
+        normalized: line.text,
+        ocrConfidence: line.score,
+        rank: valid ? Number(rankName(line).toFixed(2)) : null,
+        decision: selected ? 'selected' as const : valid ? 'candidate' as const : 'rejected' as const,
+        reason: selected ? 'Best supported name candidate' :
+          !valid ? 'Not a plausible person name after normalization' :
+          'Lower score than the selected candidate; verify against the image',
+      };
+    }),
+  };
+  const contact: ParsedContact = {
     fullName: name ? titleCase(name.text) : '',
     jobTitle: job ? cleanJobTitle(job.text) : '', companyName: company ? cleanCompanyName(company.text) : '',
     email: emails.join(', '), phone: phones.join(', '), website: websites[0] || '',
     address: distinct(addressLines.map(line => line.text.replace(/^[\s|•~]+/, '').replace(/[\s|•~=]+$/, '').trim())).join('\n'), notes,
     confidenceScore,
   };
+  return { contact, diagnostics };
+}
+
+export function parseContact(lines: OCRLine[]): ParsedContact {
+  return parseContactWithDiagnostics(lines).contact;
 }

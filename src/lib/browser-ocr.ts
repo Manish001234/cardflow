@@ -1,7 +1,8 @@
 /** Browser-only OCR: lighter Tesseract worker on mobile, existing PaddleOCR on desktop.
  * No external inference service, and neither path sends images to an AI API.
  */
-import { parseContact, type OCRLine } from './contact-parser';
+import { parseContactWithDiagnostics, type OCRLine } from './contact-parser';
+import { rememberOCRDiagnostics } from './ocr-diagnostics';
 import type { BusinessCard } from '@/types/card';
 
 type PaddleEngine = { predict: (image: Blob) => Promise<Array<{ items: Array<{ text: string; score: number; poly?: unknown }> }>> };
@@ -86,9 +87,11 @@ export async function extractBrowserCard(front: File, back?: File): Promise<Busi
   if (typeof window === 'undefined') throw new Error('Free OCR is available only in a browser.');
   const lines = mobileBrowser() ? await mobileLines(front, back) : await paddleLines(front, back);
   if (!lines.length) throw new Error('No readable text found. Try a sharper, brighter image.');
-  const parsed = parseContact(lines);
+  const { contact: parsed, diagnostics } = parseContactWithDiagnostics(lines);
   if (!parsed.fullName && !parsed.companyName && !parsed.email && !parsed.phone) {
     throw new Error('No recognizable contact fields found. Try a clearer photo or enter details manually.');
   }
-  return { id: crypto.randomUUID(), ...parsed };
+  const id = crypto.randomUUID();
+  rememberOCRDiagnostics(id, diagnostics);
+  return { id, ...parsed };
 }
